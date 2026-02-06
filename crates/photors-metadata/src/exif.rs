@@ -31,8 +31,7 @@ impl ExifData {
             .with_context(|| format!("read EXIF from {}", path.display()))?;
 
         Ok(Self {
-            width: get_u32(&exif, Tag::PixelXDimension)
-                .or_else(|| get_u32(&exif, Tag::ImageWidth)),
+            width: get_u32(&exif, Tag::PixelXDimension).or_else(|| get_u32(&exif, Tag::ImageWidth)),
             height: get_u32(&exif, Tag::PixelYDimension)
                 .or_else(|| get_u32(&exif, Tag::ImageLength)),
             camera_make: get_string(&exif, Tag::Make),
@@ -51,7 +50,10 @@ impl ExifData {
         let mut lines = Vec::new();
 
         if let Some(ref make) = self.camera_make {
-            lines.push(("Camera".into(), format!("{} {}", make, self.camera_model.as_deref().unwrap_or(""))));
+            lines.push((
+                "Camera".into(),
+                format!("{} {}", make, self.camera_model.as_deref().unwrap_or("")),
+            ));
         }
         if let Some(ref lens) = self.lens {
             lines.push(("Lens".into(), lens.clone()));
@@ -86,18 +88,26 @@ fn get_string(exif: &exif::Exif, tag: Tag) -> Option<String> {
 }
 
 fn get_u32(exif: &exif::Exif, tag: Tag) -> Option<u32> {
-    exif.get_field(tag, In::PRIMARY).and_then(|f| match f.value {
-        exif::Value::Short(ref v) => v.first().map(|&x| x as u32),
-        exif::Value::Long(ref v) => v.first().copied(),
-        _ => f.display_value().to_string().trim().parse().ok(),
-    })
+    exif.get_field(tag, In::PRIMARY)
+        .and_then(|f| match f.value {
+            exif::Value::Short(ref v) => v.first().map(|&x| x as u32),
+            exif::Value::Long(ref v) => v.first().copied(),
+            _ => f.display_value().to_string().trim().parse().ok(),
+        })
 }
 
 fn get_rational_f64(exif: &exif::Exif, tag: Tag) -> Option<f64> {
-    exif.get_field(tag, In::PRIMARY).and_then(|f| match f.value {
-        exif::Value::Rational(ref v) => v.first().map(|r| r.num as f64 / r.denom as f64),
-        _ => f.display_value().to_string().trim().parse().ok(),
-    })
+    exif.get_field(tag, In::PRIMARY)
+        .and_then(|f| match f.value {
+            exif::Value::Rational(ref v) => v.first().and_then(|r| {
+                if r.denom == 0 {
+                    None
+                } else {
+                    Some(r.num as f64 / r.denom as f64)
+                }
+            }),
+            _ => f.display_value().to_string().trim().parse().ok(),
+        })
 }
 
 #[cfg(test)]
