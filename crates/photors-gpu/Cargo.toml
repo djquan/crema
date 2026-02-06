@@ -8,6 +8,5 @@ license = "GPL-3.0-only"
 photors-core = { workspace = true }
 wgpu = { workspace = true }
 anyhow = { workspace = true }
-thiserror = { workspace = true }
 tracing = { workspace = true }
 bytemuck = { workspace = true }

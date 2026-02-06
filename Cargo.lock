@@ -3365,7 +3365,6 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -3376,10 +3375,8 @@ dependencies = [
  "anyhow",
  "image",
  "rawler",
- "rayon",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -3390,7 +3387,6 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "photors-core",
- "thiserror 2.0.18",
  "tracing",
  "wgpu",
 ]
@@ -3403,7 +3399,6 @@ dependencies = [
  "kamadak-exif",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -3415,9 +3410,6 @@ dependencies = [
  "blake3",
  "image",
  "photors-core",
- "rayon",
- "thiserror 2.0.18",
- "tokio",
  "tracing",
 ]
 

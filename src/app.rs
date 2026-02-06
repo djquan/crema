@@ -40,7 +40,6 @@ pub struct App {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum Message {
     // Navigation
     OpenPhoto(PhotoId),
@@ -58,9 +57,13 @@ pub enum Message {
     ExposureChanged(f32),
     WbTempChanged(f32),
     WbTintChanged(f32),
+    #[allow(dead_code)]
     CropXChanged(f32),
+    #[allow(dead_code)]
     CropYChanged(f32),
+    #[allow(dead_code)]
     CropWChanged(f32),
+    #[allow(dead_code)]
     CropHChanged(f32),
 
     // Image loading
@@ -90,15 +93,11 @@ impl App {
             current_exif: Vec::new(),
             status_message: "Welcome to Photors. Import a folder to get started.".into(),
             processing_generation: 0,
-            thumbnail_cache_dir: dirs::cache_dir()
-                .map(|d| d.join("photors").join("thumbnails")),
+            thumbnail_cache_dir: dirs::cache_dir().map(|d| d.join("photors").join("thumbnails")),
         };
 
         let default_catalog = dirs_catalog_path();
-        let task = Task::perform(
-            async move { default_catalog },
-            Message::CatalogOpened,
-        );
+        let task = Task::perform(async move { default_catalog }, Message::CatalogOpened);
 
         (app, task)
     }
@@ -146,18 +145,16 @@ impl App {
                 Task::none()
             }
 
-            Message::ImportFolder => {
-                Task::perform(
-                    async {
-                        let handle = rfd::AsyncFileDialog::new()
-                            .set_title("Select folder to import")
-                            .pick_folder()
-                            .await;
-                        handle.map(|h| h.path().to_path_buf())
-                    },
-                    Message::FolderSelected,
-                )
-            }
+            Message::ImportFolder => Task::perform(
+                async {
+                    let handle = rfd::AsyncFileDialog::new()
+                        .set_title("Select folder to import")
+                        .pick_folder()
+                        .await;
+                    handle.map(|h| h.path().to_path_buf())
+                },
+                Message::FolderSelected,
+            ),
 
             Message::FolderSelected(Some(folder)) => {
                 self.status_message = format!("Importing from {}...", folder.display());
@@ -245,11 +242,18 @@ impl App {
                                 .ok()
                                 .map(|e| e.summary_lines())
                                 .unwrap_or_default();
-                            info!(elapsed_ms = t0.elapsed().as_millis(), w = buf.width, h = buf.height, "image loaded");
+                            info!(
+                                elapsed_ms = t0.elapsed().as_millis(),
+                                w = buf.width,
+                                h = buf.height,
+                                "image loaded"
+                            );
                             Some((id, Arc::new(buf), Arc::new(preview), exif))
                         },
                         |result| match result {
-                            Some((id, buf, preview, exif)) => Message::ImageLoaded(id, buf, preview, exif),
+                            Some((id, buf, preview, exif)) => {
+                                Message::ImageLoaded(id, buf, preview, exif)
+                            }
                             None => Message::Noop,
                         },
                     )
@@ -367,7 +371,9 @@ impl App {
                 let handle = iced::widget::image::Handle::from_rgba(w, h, rgba);
                 (generation, handle, histogram)
             },
-            |(generation, handle, histogram)| Message::ImageProcessed(generation, handle, Box::new(histogram)),
+            |(generation, handle, histogram)| {
+                Message::ImageProcessed(generation, handle, Box::new(histogram))
+            },
         )
     }
 
@@ -417,9 +423,7 @@ fn dirs_catalog_path() -> String {
 }
 
 fn thumbnail_cache_key(path: &std::path::Path) -> String {
-    let mtime = std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok();
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
     let mut hasher = blake3::Hasher::new();
     hasher.update(path.to_string_lossy().as_bytes());
     if let Some(t) = mtime {
@@ -429,7 +433,10 @@ fn thumbnail_cache_key(path: &std::path::Path) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-fn load_thumbnail_bytes(path: &str, cache_dir: Option<&std::path::Path>) -> anyhow::Result<Vec<u8>> {
+fn load_thumbnail_bytes(
+    path: &str,
+    cache_dir: Option<&std::path::Path>,
+) -> anyhow::Result<Vec<u8>> {
     let p = std::path::Path::new(path);
 
     if let Some(dir) = cache_dir
