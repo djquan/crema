@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use iced::widget::{button, column, container, image, row, text, Space};
+use iced::widget::{Space, button, column, container, image, row, text};
 use iced::{Element, Length};
 
 use photors_catalog::models::{Photo, PhotoId};
@@ -29,11 +29,7 @@ pub fn view<'a>(
         current_row.push(cell);
 
         if current_row.len() >= GRID_COLUMNS {
-            grid_rows.push(
-                row(std::mem::take(&mut current_row))
-                    .spacing(8)
-                    .into(),
-            );
+            grid_rows.push(row(std::mem::take(&mut current_row)).spacing(8).into());
         }
     }
 
@@ -42,11 +38,7 @@ pub fn view<'a>(
         while current_row.len() < GRID_COLUMNS {
             current_row.push(Space::new().width(THUMB_SIZE).into());
         }
-        grid_rows.push(
-            row(std::mem::take(&mut current_row))
-                .spacing(8)
-                .into(),
-        );
+        grid_rows.push(row(std::mem::take(&mut current_row)).spacing(8).into());
     }
 
     column(grid_rows).spacing(8).padding(10).into()
@@ -62,8 +54,9 @@ fn photo_cell<'a>(
         .to_string_lossy()
         .to_string();
 
-    let display_name = if filename.len() > 20 {
-        format!("{}...", &filename[..17])
+    let display_name = if filename.chars().count() > 20 {
+        let truncated: String = filename.chars().take(17).collect();
+        format!("{truncated}...")
     } else {
         filename
     };
