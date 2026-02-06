@@ -51,8 +51,8 @@ pub enum Message {
     BackToGrid,
 
     // Import
-    ImportFolder,
-    FolderSelected(Option<PathBuf>),
+    Import,
+    ImportsSelected(Vec<PathBuf>),
     ImportComplete(usize, usize),
 
     // Thumbnails
@@ -100,7 +100,7 @@ impl App {
             histogram: None,
             edit_params: EditParams::default(),
             current_exif: Vec::new(),
-            status_message: "Welcome to Crema. Import a folder to get started.".into(),
+            status_message: "Welcome to Crema. Import photos to get started.".into(),
             processing_generation: 0,
             thumbnail_cache_dir: dirs::cache_dir().map(|d| d.join("crema").join("thumbnails")),
             date_filter: DateFilter::All,
@@ -156,25 +156,36 @@ impl App {
                 Task::none()
             }
 
-            Message::ImportFolder => Task::perform(
+            Message::Import => Task::perform(
                 async {
-                    let handle = rfd::AsyncFileDialog::new()
-                        .set_title("Select folder to import")
-                        .pick_folder()
-                        .await;
-                    handle.map(|h| h.path().to_path_buf())
+                    let dialog = rfd::AsyncFileDialog::new()
+                        .set_title("Import photos")
+                        .add_filter(
+                            "Images",
+                            &[
+                                "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2",
+                                "raf", "rw2", "orf", "pef", "dng", "3fr", "ari", "bay",
+                                "cap", "dcr", "erf", "fff", "iiq", "k25", "kdc", "mef",
+                                "mos", "mrw", "raw", "rwl", "srw", "x3f", "jpg", "jpeg",
+                                "png", "tiff", "tif",
+                            ],
+                        );
+                    let handles = dialog.pick_files().await.unwrap_or_default();
+                    handles.iter().map(|h| h.path().to_path_buf()).collect()
                 },
-                Message::FolderSelected,
+                Message::ImportsSelected,
             ),
 
-            Message::FolderSelected(Some(folder)) => {
-                self.status_message = format!("Importing from {}...", folder.display());
+            Message::ImportsSelected(paths) if paths.is_empty() => Task::none(),
+
+            Message::ImportsSelected(paths) => {
+                self.status_message = format!("Importing {} file(s)...", paths.len());
                 let catalog_path = self.catalog_path.clone().unwrap_or_default();
                 Task::perform(
                     async move {
                         let catalog = Catalog::open(&catalog_path).ok();
                         if let Some(catalog) = catalog {
-                            match crema_catalog::import::import_folder(&catalog, &folder) {
+                            match crema_catalog::import::import_paths(&catalog, &paths) {
                                 Ok(result) => (result.imported.len(), result.errors.len()),
                                 Err(_) => (0, 1),
                             }
@@ -185,8 +196,6 @@ impl App {
                     |(imported, errors)| Message::ImportComplete(imported, errors),
                 )
             }
-
-            Message::FolderSelected(None) => Task::none(),
 
             Message::ImportComplete(imported, errors) => {
                 self.status_message = format!("Imported {imported} photos ({errors} errors)");

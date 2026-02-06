@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use tracing::{info, warn};
@@ -49,7 +49,7 @@ pub fn import_folder(catalog: &Catalog, folder: &Path) -> Result<ImportResult> {
             continue;
         }
 
-        match import_single_file(catalog, &path) {
+        match import_file(catalog, &path) {
             Ok(Some(id)) => result.imported.push(id),
             Ok(None) => result.skipped += 1,
             Err(err) => {
@@ -69,7 +69,58 @@ pub fn import_folder(catalog: &Catalog, folder: &Path) -> Result<ImportResult> {
     Ok(result)
 }
 
-fn import_single_file(catalog: &Catalog, path: &Path) -> Result<Option<PhotoId>> {
+/// Import a mixed list of files and directories into the catalog.
+///
+/// Directories are scanned for supported images. Files are imported directly
+/// if they have a supported extension.
+pub fn import_paths(catalog: &Catalog, paths: &[PathBuf]) -> Result<ImportResult> {
+    info!(count = paths.len(), "importing paths");
+
+    let mut result = ImportResult {
+        imported: Vec::new(),
+        skipped: 0,
+        errors: Vec::new(),
+    };
+
+    for path in paths {
+        if path.is_dir() {
+            match import_folder(catalog, path) {
+                Ok(sub) => {
+                    result.imported.extend(sub.imported);
+                    result.skipped += sub.skipped;
+                    result.errors.extend(sub.errors);
+                }
+                Err(err) => {
+                    result.errors.push(format!("{}: {err}", path.display()));
+                }
+            }
+        } else if path.is_file() {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !crema_core::raw::is_supported_extension(ext) {
+                continue;
+            }
+            match import_file(catalog, path) {
+                Ok(Some(id)) => result.imported.push(id),
+                Ok(None) => result.skipped += 1,
+                Err(err) => {
+                    warn!(?path, %err, "failed to import");
+                    result.errors.push(format!("{}: {err}", path.display()));
+                }
+            }
+        }
+    }
+
+    info!(
+        imported = result.imported.len(),
+        skipped = result.skipped,
+        errors = result.errors.len(),
+        "import complete"
+    );
+
+    Ok(result)
+}
+
+pub fn import_file(catalog: &Catalog, path: &Path) -> Result<Option<PhotoId>> {
     let canonical = path
         .canonicalize()
         .with_context(|| format!("failed to canonicalize: {}", path.display()))?;
