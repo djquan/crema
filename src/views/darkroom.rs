@@ -5,11 +5,18 @@ use crate::app::{App, Message};
 use crate::widgets;
 
 pub fn view(app: &App) -> Element<'_, Message> {
+    let export_button = if app.has_image() {
+        button("Export").on_press(Message::Export)
+    } else {
+        button("Export")
+    };
+
     let toolbar = row![
         button("< Back").on_press(Message::BackToGrid),
         Space::new().width(Length::Fill),
         text("Darkroom").size(20),
         Space::new().width(Length::Fill),
+        export_button,
     ]
     .spacing(10)
     .padding(10)

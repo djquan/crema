@@ -79,6 +79,11 @@ pub enum Message {
     CatalogOpened(String),
     PhotosListed(Vec<Photo>),
 
+    // Export
+    Export,
+    ExportPathSelected(PathBuf),
+    ExportComplete(String),
+
     // Date sidebar
     SetDateFilter(DateFilter),
     ToggleDateExpansion(DateExpansionKey),
@@ -309,6 +314,43 @@ impl App {
                 Task::none()
             }
 
+            Message::Export => {
+                let default_name = self.default_export_filename();
+                Task::perform(
+                    async move {
+                        let dialog = rfd::AsyncFileDialog::new()
+                            .set_title("Export photo")
+                            .set_file_name(&default_name)
+                            .add_filter("JPEG", &["jpg", "jpeg"])
+                            .add_filter("PNG", &["png"])
+                            .add_filter("TIFF", &["tiff", "tif"]);
+                        dialog.save_file().await.map(|h| h.path().to_path_buf())
+                    },
+                    |result| match result {
+                        Some(path) => Message::ExportPathSelected(path),
+                        None => Message::Noop,
+                    },
+                )
+            }
+
+            Message::ExportPathSelected(path) => {
+                let Some(ref full_res) = self.current_image else {
+                    return Task::none();
+                };
+                self.status_message = "Exporting...".into();
+                let buf = ImageBuf::clone(full_res);
+                let params = self.edit_params.clone();
+                Task::perform(
+                    async move { export_image(buf, &params, &path) },
+                    Message::ExportComplete,
+                )
+            }
+
+            Message::ExportComplete(msg) => {
+                self.status_message = msg;
+                Task::none()
+            }
+
             Message::ExposureChanged(v) => {
                 self.edit_params.exposure = v;
                 self.reprocess_image()
@@ -453,11 +495,27 @@ impl App {
         &self.expanded_dates
     }
 
+    pub fn has_image(&self) -> bool {
+        self.current_image.is_some()
+    }
+
     pub fn filtered_photos(&self) -> Vec<&Photo> {
         self.photos
             .iter()
             .filter(|p| self.date_filter.matches(p))
             .collect()
+    }
+
+    fn default_export_filename(&self) -> String {
+        if let View::Darkroom(id) = &self.view
+            && let Some(photo) = self.photos.iter().find(|p| p.id == *id)
+            && let Some(stem) = std::path::Path::new(&photo.file_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+        {
+            return format!("{stem}.jpg");
+        }
+        "export.jpg".into()
     }
 }
 
@@ -478,6 +536,46 @@ fn thumbnail_cache_key(path: &std::path::Path) -> String {
         hasher.update(&dur.as_nanos().to_le_bytes());
     }
     hasher.finalize().to_hex().to_string()
+}
+
+fn export_image(buf: ImageBuf, params: &EditParams, path: &std::path::Path) -> String {
+    let pipeline = crema_core::pipeline::Pipeline::new();
+    let processed = match pipeline.process_cpu(buf, params) {
+        Ok(p) => p,
+        Err(e) => return format!("Export failed: {e}"),
+    };
+
+    let w = processed.width;
+    let h = processed.height;
+    let rgba = processed.to_rgba_u8_srgb();
+
+    let img = match image::RgbaImage::from_raw(w, h, rgba) {
+        Some(img) => image::DynamicImage::ImageRgba8(img),
+        None => return "Export failed: could not construct image buffer".into(),
+    };
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let result = if ext == "jpg" || ext == "jpeg" {
+        let file = match std::fs::File::create(path) {
+            Ok(f) => f,
+            Err(e) => return format!("Export failed: {e}"),
+        };
+        let writer = std::io::BufWriter::new(file);
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(writer, 92);
+        img.to_rgb8().write_with_encoder(encoder)
+    } else {
+        img.save(path)
+    };
+
+    match result {
+        Ok(()) => format!("Exported to {}", path.display()),
+        Err(e) => format!("Export failed: {e}"),
+    }
 }
 
 fn load_thumbnail_bytes(
