@@ -19,13 +19,16 @@ impl ProcessingModule for Crop {
             return Ok(input);
         }
 
-        let src_x = (params.crop_x * input.width as f32) as u32;
-        let src_y = (params.crop_y * input.height as f32) as u32;
+        let src_x =
+            ((params.crop_x * input.width as f32) as u32).min(input.width.saturating_sub(1));
+        let src_y =
+            ((params.crop_y * input.height as f32) as u32).min(input.height.saturating_sub(1));
+        let remaining_w = input.width.saturating_sub(src_x);
+        let remaining_h = input.height.saturating_sub(src_y);
         let dst_w = (params.crop_w * input.width as f32).max(1.0) as u32;
         let dst_h = (params.crop_h * input.height as f32).max(1.0) as u32;
-
-        let dst_w = dst_w.min(input.width - src_x);
-        let dst_h = dst_h.min(input.height - src_y);
+        let dst_w = dst_w.min(remaining_w).max(1);
+        let dst_h = dst_h.min(remaining_h).max(1);
 
         let mut data = Vec::with_capacity((dst_w * dst_h * 3) as usize);
 
@@ -65,6 +68,21 @@ mod tests {
         let result = Crop.process_cpu(buf, &params).unwrap();
         assert_eq!(result.width, 2);
         assert_eq!(result.height, 2);
+    }
+
+    #[test]
+    fn crop_at_boundary_does_not_panic() {
+        let buf = ImageBuf::from_data(4, 4, vec![0.5; 48]).unwrap();
+        let params = EditParams {
+            crop_x: 1.0,
+            crop_y: 1.0,
+            crop_w: 0.5,
+            crop_h: 0.5,
+            ..Default::default()
+        };
+        let result = Crop.process_cpu(buf, &params).unwrap();
+        assert!(result.width >= 1);
+        assert!(result.height >= 1);
     }
 
     #[test]

@@ -105,14 +105,24 @@ impl ImageBuf {
                     }
                 }
 
-                let inv = 1.0 / count as f32;
-                data.push(r * inv);
-                data.push(g * inv);
-                data.push(b * inv);
+                if count > 0 {
+                    let inv = 1.0 / count as f32;
+                    data.push(r * inv);
+                    data.push(g * inv);
+                    data.push(b * inv);
+                } else {
+                    data.push(0.0);
+                    data.push(0.0);
+                    data.push(0.0);
+                }
             }
         }
 
-        Self { width: new_w, height: new_h, data }
+        Self {
+            width: new_w,
+            height: new_h,
+            data,
+        }
     }
 }
 
@@ -215,8 +225,7 @@ mod tests {
 
     #[test]
     fn rgba_f32_multi_pixel() {
-        let buf =
-            ImageBuf::from_data(2, 1, vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6]).unwrap();
+        let buf = ImageBuf::from_data(2, 1, vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6]).unwrap();
         let rgba = buf.to_rgba_f32();
         assert_eq!(rgba.len(), 8);
         assert_eq!(rgba[3], 1.0); // alpha of first pixel
@@ -237,7 +246,7 @@ mod tests {
     fn srgb_clamps_out_of_range() {
         let buf = ImageBuf::from_data(1, 1, vec![-0.5, 2.0, 0.5]).unwrap();
         let srgb = buf.to_rgba_u8_srgb();
-        assert_eq!(srgb[0], 0);   // clamped negative to 0
+        assert_eq!(srgb[0], 0); // clamped negative to 0
         assert_eq!(srgb[1], 255); // clamped >1.0 to 255
     }
 
