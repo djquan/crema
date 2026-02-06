@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use tracing::info;
 
 use crate::models::{EditRecord, Photo, PhotoId};
@@ -48,7 +48,7 @@ impl Catalog {
 
             CREATE TABLE IF NOT EXISTS edits (
                 id         INTEGER PRIMARY KEY,
-                photo_id   INTEGER NOT NULL REFERENCES photos(id),
+                photo_id   INTEGER NOT NULL UNIQUE REFERENCES photos(id),
                 exposure   REAL NOT NULL DEFAULT 0.0,
                 wb_temp    REAL NOT NULL DEFAULT 5500.0,
                 wb_tint    REAL NOT NULL DEFAULT 0.0,
@@ -60,13 +60,13 @@ impl Catalog {
             );
 
             CREATE INDEX IF NOT EXISTS idx_photos_hash ON photos(file_hash);
-            CREATE INDEX IF NOT EXISTS idx_edits_photo ON edits(photo_id);
             ",
         )?;
         Ok(())
     }
 
-    pub fn insert_photo(&self, photo: &InsertPhoto) -> Result<PhotoId> {
+    /// Insert a photo, returning `Some(id)` if inserted, `None` if the path already exists.
+    pub fn insert_photo(&self, photo: &InsertPhoto) -> Result<Option<PhotoId>> {
         self.conn.execute(
             "INSERT OR IGNORE INTO photos (
                 file_path, file_hash, file_size, width, height,
@@ -90,7 +90,11 @@ impl Catalog {
                 photo.thumbnail_path,
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        if self.conn.changes() == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(self.conn.last_insert_rowid()))
+        }
     }
 
     pub fn get_photo(&self, id: PhotoId) -> Result<Option<Photo>> {
@@ -111,7 +115,9 @@ impl Catalog {
                     shutter_speed, iso, date_taken, imported_at, thumbnail_path
              FROM photos ORDER BY date_taken DESC, id DESC",
         )?;
-        let photos = stmt.query_map([], row_to_photo)?.collect::<Result<Vec<_>, _>>()?;
+        let photos = stmt
+            .query_map([], row_to_photo)?
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(photos)
     }
 
@@ -127,7 +133,7 @@ impl Catalog {
         let mut stmt = self.conn.prepare(
             "SELECT id, photo_id, exposure, wb_temp, wb_tint,
                     crop_x, crop_y, crop_w, crop_h, updated_at
-             FROM edits WHERE photo_id = ?1 ORDER BY id DESC LIMIT 1",
+             FROM edits WHERE photo_id = ?1",
         )?;
         let mut rows = stmt.query_map(params![photo_id], |row| {
             Ok(EditRecord {
@@ -146,11 +152,23 @@ impl Catalog {
         Ok(rows.next().transpose()?)
     }
 
-    pub fn save_edits(&self, photo_id: PhotoId, params: &photors_core::image_buf::EditParams) -> Result<()> {
+    pub fn save_edits(
+        &self,
+        photo_id: PhotoId,
+        params: &photors_core::image_buf::EditParams,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO edits (photo_id, exposure, wb_temp, wb_tint, crop_x, crop_y, crop_w, crop_h)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT DO NOTHING",
+             ON CONFLICT(photo_id) DO UPDATE SET
+                exposure = excluded.exposure,
+                wb_temp = excluded.wb_temp,
+                wb_tint = excluded.wb_tint,
+                crop_x = excluded.crop_x,
+                crop_y = excluded.crop_y,
+                crop_w = excluded.crop_w,
+                crop_h = excluded.crop_h,
+                updated_at = datetime('now')",
             params![
                 photo_id,
                 params.exposure,
@@ -161,13 +179,6 @@ impl Catalog {
                 params.crop_w,
                 params.crop_h,
             ],
-        )?;
-        // Use upsert: delete old edits and keep only the latest
-        self.conn.execute(
-            "DELETE FROM edits WHERE photo_id = ?1 AND id != (
-                SELECT id FROM edits WHERE photo_id = ?1 ORDER BY id DESC LIMIT 1
-            )",
-            params![photo_id],
         )?;
         Ok(())
     }
@@ -242,7 +253,10 @@ mod tests {
             thumbnail_path: None,
         };
 
-        let id = catalog.insert_photo(&photo).unwrap();
+        let id = catalog
+            .insert_photo(&photo)
+            .unwrap()
+            .expect("should insert");
         assert!(id > 0);
 
         let photos = catalog.list_photos().unwrap();
@@ -272,8 +286,10 @@ mod tests {
             thumbnail_path: None,
         };
 
-        catalog.insert_photo(&photo).unwrap();
-        catalog.insert_photo(&photo).unwrap();
+        let first = catalog.insert_photo(&photo).unwrap();
+        assert!(first.is_some());
+        let second = catalog.insert_photo(&photo).unwrap();
+        assert!(second.is_none());
 
         assert_eq!(catalog.photo_count().unwrap(), 1);
     }
@@ -299,7 +315,7 @@ mod tests {
             thumbnail_path: None,
         };
 
-        let id = catalog.insert_photo(&photo).unwrap();
+        let id = catalog.insert_photo(&photo).unwrap().unwrap();
 
         let params = photors_core::image_buf::EditParams {
             exposure: 1.5,
@@ -336,7 +352,10 @@ mod tests {
     #[test]
     fn get_photo_by_id() {
         let catalog = Catalog::open_in_memory().unwrap();
-        let id = catalog.insert_photo(&minimal_photo("/a.jpg")).unwrap();
+        let id = catalog
+            .insert_photo(&minimal_photo("/a.jpg"))
+            .unwrap()
+            .unwrap();
         let photo = catalog.get_photo(id).unwrap().unwrap();
         assert_eq!(photo.file_path, "/a.jpg");
     }
@@ -350,14 +369,20 @@ mod tests {
     #[test]
     fn get_edits_nonexistent() {
         let catalog = Catalog::open_in_memory().unwrap();
-        let id = catalog.insert_photo(&minimal_photo("/no_edits.jpg")).unwrap();
+        let id = catalog
+            .insert_photo(&minimal_photo("/no_edits.jpg"))
+            .unwrap()
+            .unwrap();
         assert!(catalog.get_edits(id).unwrap().is_none());
     }
 
     #[test]
     fn update_thumbnail_path() {
         let catalog = Catalog::open_in_memory().unwrap();
-        let id = catalog.insert_photo(&minimal_photo("/thumb.jpg")).unwrap();
+        let id = catalog
+            .insert_photo(&minimal_photo("/thumb.jpg"))
+            .unwrap()
+            .unwrap();
         catalog.update_thumbnail(id, "/cache/abc.jpg").unwrap();
         let photo = catalog.get_photo(id).unwrap().unwrap();
         assert_eq!(photo.thumbnail_path.as_deref(), Some("/cache/abc.jpg"));
@@ -366,7 +391,10 @@ mod tests {
     #[test]
     fn save_edits_overwrites_previous() {
         let catalog = Catalog::open_in_memory().unwrap();
-        let id = catalog.insert_photo(&minimal_photo("/overwrite.jpg")).unwrap();
+        let id = catalog
+            .insert_photo(&minimal_photo("/overwrite.jpg"))
+            .unwrap()
+            .unwrap();
 
         let params1 = photors_core::image_buf::EditParams {
             exposure: 1.0,
@@ -394,8 +422,8 @@ mod tests {
         let mut p2 = minimal_photo("/second.jpg");
         p2.date_taken = Some("2024-06-01T00:00:00".to_string());
 
-        catalog.insert_photo(&p1).unwrap();
-        catalog.insert_photo(&p2).unwrap();
+        catalog.insert_photo(&p1).unwrap().unwrap();
+        catalog.insert_photo(&p2).unwrap().unwrap();
 
         let photos = catalog.list_photos().unwrap();
         assert_eq!(photos.len(), 2);
@@ -413,7 +441,10 @@ mod tests {
     #[test]
     fn edit_record_to_edit_params() {
         let catalog = Catalog::open_in_memory().unwrap();
-        let id = catalog.insert_photo(&minimal_photo("/convert.jpg")).unwrap();
+        let id = catalog
+            .insert_photo(&minimal_photo("/convert.jpg"))
+            .unwrap()
+            .unwrap();
 
         let params = photors_core::image_buf::EditParams {
             exposure: -2.0,

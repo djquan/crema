@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -42,10 +43,7 @@ pub fn import_folder(catalog: &Catalog, folder: &Path) -> Result<ImportResult> {
             continue;
         }
 
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         if !photors_core::raw::is_supported_extension(ext) {
             continue;
@@ -77,10 +75,26 @@ fn import_single_file(catalog: &Catalog, path: &Path) -> Result<Option<PhotoId>>
         .with_context(|| format!("failed to canonicalize: {}", path.display()))?;
     let file_path = canonical.to_string_lossy().to_string();
 
-    let file_bytes = fs::read(&canonical)
-        .with_context(|| format!("failed to read: {}", canonical.display()))?;
-    let file_size = file_bytes.len() as i64;
-    let file_hash = blake3::hash(&file_bytes).to_hex().to_string();
+    let metadata = fs::metadata(&canonical)
+        .with_context(|| format!("failed to stat: {}", canonical.display()))?;
+    let file_size = metadata.len() as i64;
+
+    let file_hash = {
+        let mut file = fs::File::open(&canonical)
+            .with_context(|| format!("failed to open: {}", canonical.display()))?;
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = file
+                .read(&mut buf)
+                .with_context(|| format!("failed to read: {}", canonical.display()))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        hasher.finalize().to_hex().to_string()
+    };
 
     let exif = ExifData::from_file(&canonical).ok();
 
@@ -101,10 +115,5 @@ fn import_single_file(catalog: &Catalog, path: &Path) -> Result<Option<PhotoId>>
         thumbnail_path: None,
     };
 
-    let id = catalog.insert_photo(&insert)?;
-    if id == 0 {
-        return Ok(None); // duplicate, was ignored
-    }
-
-    Ok(Some(id))
+    catalog.insert_photo(&insert)
 }
