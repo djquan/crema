@@ -41,7 +41,10 @@ pub fn decode_raw(path: &Path) -> Result<ImageBuf> {
     let intermediate = develop
         .develop_intermediate(&raw_image)
         .with_context(|| format!("development failed: {}", path.display()))?;
-    debug!(elapsed_ms = t1.elapsed().as_millis(), "rawler develop_intermediate");
+    debug!(
+        elapsed_ms = t1.elapsed().as_millis(),
+        "rawler develop_intermediate"
+    );
 
     match intermediate {
         rawler::imgop::develop::Intermediate::ThreeColor(rgb) => {
@@ -54,7 +57,10 @@ pub fn decode_raw(path: &Path) -> Result<ImageBuf> {
                 data.push(srgb_f32_to_linear(pixel[1]));
                 data.push(srgb_f32_to_linear(pixel[2]));
             }
-            debug!(elapsed_ms = t2.elapsed().as_millis(), "srgb_to_linear conversion");
+            debug!(
+                elapsed_ms = t2.elapsed().as_millis(),
+                "srgb_to_linear conversion"
+            );
             debug!(elapsed_ms = t0.elapsed().as_millis(), "total decode_raw");
             ImageBuf::from_data(width, height, data)
         }
@@ -75,15 +81,25 @@ pub fn load_image_scaled(path: &Path, max_edge: Option<u32>) -> Result<ImageBuf>
     info!(?path, "loading image file");
     let t0 = std::time::Instant::now();
 
-    let img = image::open(path)
-        .with_context(|| format!("failed to open image: {}", path.display()))?;
-    debug!(elapsed_ms = t0.elapsed().as_millis(), width = img.width(), height = img.height(), "image decode");
+    let img =
+        image::open(path).with_context(|| format!("failed to open image: {}", path.display()))?;
+    debug!(
+        elapsed_ms = t0.elapsed().as_millis(),
+        width = img.width(),
+        height = img.height(),
+        "image decode"
+    );
 
     let img = match max_edge {
         Some(max) if img.width().max(img.height()) > max => {
             let t1 = std::time::Instant::now();
             let resized = img.resize(max, max, image::imageops::FilterType::Triangle);
-            debug!(elapsed_ms = t1.elapsed().as_millis(), width = resized.width(), height = resized.height(), "u8 resize");
+            debug!(
+                elapsed_ms = t1.elapsed().as_millis(),
+                width = resized.width(),
+                height = resized.height(),
+                "u8 resize"
+            );
             resized.into_rgb8()
         }
         _ => img.into_rgb8(),
@@ -116,10 +132,7 @@ pub fn load_any(path: &Path) -> Result<ImageBuf> {
 /// For RAW files, we must decode at full resolution (rawler doesn't
 /// support partial decode), then downsample in linear space.
 pub fn load_any_scaled(path: &Path, max_edge: Option<u32>) -> Result<ImageBuf> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     if is_raw_extension(ext) {
         let buf = decode_raw(path)?;

@@ -172,10 +172,13 @@ impl GpuPipeline {
         input: &GpuTexture,
         params: &EditParams,
     ) -> Result<GpuTexture> {
-        debug!(temp = params.wb_temp, tint = params.wb_tint, "GPU white balance");
+        debug!(
+            temp = params.wb_temp,
+            tint = params.wb_tint,
+            "GPU white balance"
+        );
 
-        let output =
-            GpuTexture::create_storage(&ctx.device, input.width, input.height, "wb_out");
+        let output = GpuTexture::create_storage(&ctx.device, input.width, input.height, "wb_out");
 
         let temp_shift = (params.wb_temp - 5500.0) / 5500.0;
         let r_mult = (1.0 + temp_shift * 0.3_f32).max(0.1);

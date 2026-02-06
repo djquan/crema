@@ -1,5 +1,5 @@
-use iced::widget::{column, container, row, slider, text};
 use iced::Element;
+use iced::widget::{column, container, row, slider, text};
 
 use photors_core::image_buf::EditParams;
 
@@ -30,11 +30,9 @@ pub fn view(params: &EditParams) -> Element<'_, Message> {
         Message::WbTintChanged,
     );
 
-    container(
-        column![text("Develop").size(16), exposure, wb_temp, wb_tint,].spacing(12),
-    )
-    .padding(10)
-    .into()
+    container(column![text("Develop").size(16), exposure, wb_temp, wb_tint,].spacing(12))
+        .padding(10)
+        .into()
 }
 
 fn labeled_slider<'a>(

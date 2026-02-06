@@ -123,7 +123,9 @@ mod tests {
     #[test]
     fn histogram_from_solid_color() {
         // 2x2 image, all red (255,0,0,255)
-        let pixels = vec![255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255];
+        let pixels = vec![
+            255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+        ];
         let hist = HistogramData::from_rgba_u8(&pixels);
         assert_eq!(hist.r[255], 4);
         assert_eq!(hist.r[0], 0);

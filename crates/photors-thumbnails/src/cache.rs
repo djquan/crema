@@ -20,7 +20,9 @@ impl ThumbnailCache {
     pub fn thumbnail_path(&self, content_hash: &str) -> PathBuf {
         // Use first 2 chars as subdirectory to avoid too many files in one dir
         let subdir = &content_hash[..2.min(content_hash.len())];
-        self.cache_dir.join(subdir).join(format!("{content_hash}.jpg"))
+        self.cache_dir
+            .join(subdir)
+            .join(format!("{content_hash}.jpg"))
     }
 
     /// Check if a thumbnail already exists in the cache.
@@ -34,8 +36,7 @@ impl ThumbnailCache {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&path, data)
-            .with_context(|| format!("write thumbnail: {}", path.display()))?;
+        fs::write(&path, data).with_context(|| format!("write thumbnail: {}", path.display()))?;
         debug!(?path, "cached thumbnail");
         Ok(path)
     }

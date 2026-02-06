@@ -64,12 +64,7 @@ impl GpuTexture {
     }
 
     /// Create an empty texture for use as a compute shader output.
-    pub fn create_storage(
-        device: &wgpu::Device,
-        width: u32,
-        height: u32,
-        label: &str,
-    ) -> Self {
+    pub fn create_storage(device: &wgpu::Device, width: u32, height: u32, label: &str) -> Self {
         let size = wgpu::Extent3d {
             width,
             height,
@@ -148,7 +143,10 @@ impl GpuTexture {
                 let _ = sender.send(result);
             });
         device
-            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
             .map_err(|e| anyhow::anyhow!("GPU poll error: {e}"))?;
         receiver
             .recv()

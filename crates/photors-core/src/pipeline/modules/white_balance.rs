@@ -13,9 +13,7 @@ impl ProcessingModule for WhiteBalance {
     fn process_cpu(&self, mut input: ImageBuf, params: &EditParams) -> Result<ImageBuf> {
         let (r_mult, g_mult, b_mult) = temp_tint_to_multipliers(params.wb_temp, params.wb_tint);
 
-        if (r_mult - 1.0).abs() < 1e-6
-            && (g_mult - 1.0).abs() < 1e-6
-            && (b_mult - 1.0).abs() < 1e-6
+        if (r_mult - 1.0).abs() < 1e-6 && (g_mult - 1.0).abs() < 1e-6 && (b_mult - 1.0).abs() < 1e-6
         {
             return Ok(input);
         }

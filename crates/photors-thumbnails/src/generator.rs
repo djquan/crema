@@ -29,10 +29,7 @@ pub fn generate_thumbnail(buf: &ImageBuf) -> Result<Vec<u8>> {
         .write_to(&mut cursor, image::ImageFormat::Jpeg)
         .context("encode thumbnail as JPEG")?;
 
-    debug!(
-        size = jpeg_bytes.len(),
-        "generated thumbnail"
-    );
+    debug!(size = jpeg_bytes.len(), "generated thumbnail");
 
     Ok(jpeg_bytes)
 }
