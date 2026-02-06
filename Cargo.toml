@@ -51,7 +51,7 @@ tokio = { workspace = true }
 bytemuck = { workspace = true }
 image = { workspace = true }
 blake3 = { workspace = true }
-rfd = "0.15"
+rfd = "0.17"
 dirs = "6"
 
 # Optimize all dependencies even in dev builds. Without this, per-pixel
