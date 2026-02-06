@@ -1,4 +1,5 @@
 mod app;
+mod menu;
 mod views;
 mod widgets;
 
@@ -12,6 +13,7 @@ fn main() -> iced::Result {
         .init();
 
     iced::application(app::App::new, app::App::update, app::App::view)
+        .subscription(app::App::subscription)
         .title(app::App::title)
         .theme(app::App::theme)
         .window_size(iced::Size::new(1400.0, 900.0))

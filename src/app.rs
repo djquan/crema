@@ -21,6 +21,7 @@ pub enum View {
 }
 
 pub struct App {
+    menu: Option<crate::menu::AppMenu>,
     view: View,
     catalog: Option<Catalog>,
     catalog_path: Option<String>,
@@ -94,6 +95,7 @@ pub enum Message {
 impl App {
     pub fn new() -> (Self, Task<Message>) {
         let app = Self {
+            menu: None,
             view: View::Lighttable,
             catalog: None,
             catalog_path: None,
@@ -144,6 +146,10 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if self.menu.is_none() {
+            self.menu = Some(crate::menu::build());
+        }
+
         match message {
             Message::CatalogOpened(path) => {
                 match Catalog::open(&path) {
@@ -290,6 +296,9 @@ impl App {
                 self.current_image = Some(buf);
                 self.preview_image = Some(preview);
                 self.current_exif = exif;
+                if let Some(menu) = &self.menu {
+                    menu.export_item.set_enabled(true);
+                }
                 self.reprocess_image()
             }
 
@@ -310,6 +319,9 @@ impl App {
                 self.preview_image = None;
                 self.processed_image = None;
                 self.histogram = None;
+                if let Some(menu) = &self.menu {
+                    menu.export_item.set_enabled(false);
+                }
                 Task::none()
             }
 
@@ -393,6 +405,10 @@ impl App {
 
             Message::Noop => Task::none(),
         }
+    }
+
+    pub fn subscription(&self) -> iced::Subscription<Message> {
+        crate::menu::subscription()
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -492,10 +508,6 @@ impl App {
 
     pub fn expanded_dates(&self) -> &HashSet<DateExpansionKey> {
         &self.expanded_dates
-    }
-
-    pub fn has_image(&self) -> bool {
-        self.current_image.is_some()
     }
 
     pub fn filtered_photos(&self) -> Vec<&Photo> {

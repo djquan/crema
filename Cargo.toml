@@ -52,6 +52,7 @@ bytemuck = { workspace = true }
 image = { workspace = true }
 blake3 = { workspace = true }
 rfd = "0.17"
+muda = "0.17"
 dirs = "6"
 
 [dev-dependencies]
