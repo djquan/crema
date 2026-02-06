@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,6 +11,7 @@ use crema_core::image_buf::{EditParams, ImageBuf};
 use crema_thumbnails::cache::ThumbnailCache;
 
 use crate::views;
+use crate::widgets::date_sidebar::{DateExpansionKey, DateFilter};
 use crate::widgets::histogram::HistogramData;
 
 #[derive(Debug, Clone)]
@@ -37,6 +39,9 @@ pub struct App {
 
     processing_generation: u64,
     thumbnail_cache_dir: Option<PathBuf>,
+
+    date_filter: DateFilter,
+    expanded_dates: HashSet<DateExpansionKey>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +79,10 @@ pub enum Message {
     CatalogOpened(String),
     PhotosListed(Vec<Photo>),
 
+    // Date sidebar
+    SetDateFilter(DateFilter),
+    ToggleDateExpansion(DateExpansionKey),
+
     Noop,
 }
 
@@ -94,6 +103,8 @@ impl App {
             status_message: "Welcome to Crema. Import a folder to get started.".into(),
             processing_generation: 0,
             thumbnail_cache_dir: dirs::cache_dir().map(|d| d.join("crema").join("thumbnails")),
+            date_filter: DateFilter::All,
+            expanded_dates: HashSet::new(),
         };
 
         let default_catalog = dirs_catalog_path();
@@ -318,6 +329,18 @@ impl App {
                 self.reprocess_image()
             }
 
+            Message::SetDateFilter(f) => {
+                self.date_filter = f;
+                Task::none()
+            }
+
+            Message::ToggleDateExpansion(key) => {
+                if !self.expanded_dates.remove(&key) {
+                    self.expanded_dates.insert(key);
+                }
+                Task::none()
+            }
+
             Message::Noop => Task::none(),
         }
     }
@@ -411,6 +434,21 @@ impl App {
 
     pub fn status_message(&self) -> &str {
         &self.status_message
+    }
+
+    pub fn date_filter(&self) -> &DateFilter {
+        &self.date_filter
+    }
+
+    pub fn expanded_dates(&self) -> &HashSet<DateExpansionKey> {
+        &self.expanded_dates
+    }
+
+    pub fn filtered_photos(&self) -> Vec<&Photo> {
+        self.photos
+            .iter()
+            .filter(|p| self.date_filter.matches(p))
+            .collect()
     }
 }
 

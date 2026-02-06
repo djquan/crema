@@ -11,7 +11,7 @@ const THUMB_SIZE: f32 = 200.0;
 const GRID_COLUMNS: usize = 5;
 
 pub fn view<'a>(
-    photos: &'a [Photo],
+    photos: Vec<&'a Photo>,
     thumbnails: &'a HashMap<PhotoId, iced::widget::image::Handle>,
 ) -> Element<'a, Message> {
     if photos.is_empty() {

@@ -14,13 +14,21 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .padding(10)
     .align_y(Alignment::Center);
 
-    let grid = widgets::thumbnail_grid::view(app.photos(), app.thumbnails());
+    let sidebar =
+        widgets::date_sidebar::view(app.photos(), app.date_filter(), app.expanded_dates());
+
+    let grid = scrollable(widgets::thumbnail_grid::view(
+        app.filtered_photos(),
+        app.thumbnails(),
+    ))
+    .height(Length::Fill)
+    .width(Length::Fill);
 
     let status = container(text(app.status_message()).size(12))
         .padding(5)
         .width(Length::Fill);
 
-    column![toolbar, scrollable(grid).height(Length::Fill), status]
+    column![toolbar, row![sidebar, grid].height(Length::Fill), status]
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
