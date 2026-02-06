@@ -148,6 +148,8 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         if self.menu.is_none() {
             self.menu = Some(crate::menu::build());
+            #[cfg(target_os = "macos")]
+            crate::icon::set_dock_icon();
         }
 
         match message {
