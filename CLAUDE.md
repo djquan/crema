@@ -14,7 +14,7 @@ cargo run                        # launch the GUI app
 RUST_LOG=debug cargo run         # launch with verbose logging
 ```
 
-Linux requires: `sudo apt-get install libwayland-dev libxkbcommon-dev`
+Linux requires: `sudo apt-get install libwayland-dev libxkbcommon-dev libgtk-3-dev libxdo-dev`
 
 ## Architecture
 

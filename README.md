@@ -19,7 +19,7 @@ A GPU-accelerated photo editor and browser, built in Rust. Think Lightroom, but 
 Requires Rust (edition 2024). On Linux, you also need:
 
 ```bash
-sudo apt-get install libwayland-dev libxkbcommon-dev
+sudo apt-get install libwayland-dev libxkbcommon-dev libgtk-3-dev libxdo-dev
 ```
 
 Then:

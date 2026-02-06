@@ -68,11 +68,9 @@ pub fn build() -> AppMenu {
 }
 
 pub fn subscription() -> Subscription<Message> {
-    iced::time::every(Duration::from_millis(50)).map(|_| {
-        match MenuEvent::receiver().try_recv() {
-            Ok(event) if event.id == "import" => Message::Import,
-            Ok(event) if event.id == "export" => Message::Export,
-            _ => Message::Noop,
-        }
+    iced::time::every(Duration::from_millis(50)).map(|_| match MenuEvent::receiver().try_recv() {
+        Ok(event) if event.id == "import" => Message::Import,
+        Ok(event) if event.id == "export" => Message::Export,
+        _ => Message::Noop,
     })
 }
