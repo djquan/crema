@@ -6,7 +6,7 @@ use crate::widgets;
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let toolbar = row![
-        text("Photors").size(24),
+        text("Crema").size(24),
         Space::new().width(Length::Fill),
         button("Import Folder").on_press(Message::ImportFolder),
     ]

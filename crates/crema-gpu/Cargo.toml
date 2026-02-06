@@ -1,12 +1,12 @@
 [package]
-name = "photors-thumbnails"
+name = "crema-gpu"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
 
 [dependencies]
-photors-core = { workspace = true }
-image = { workspace = true }
-blake3 = { workspace = true }
+crema-core = { workspace = true }
+wgpu = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+bytemuck = { workspace = true }

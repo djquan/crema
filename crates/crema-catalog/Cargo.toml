@@ -1,14 +1,15 @@
 [package]
-name = "photors-metadata"
+name = "crema-catalog"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
 
 [dependencies]
-kamadak-exif = { workspace = true }
+crema-core = { workspace = true }
+crema-metadata = { workspace = true }
+rusqlite = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
-
-[dev-dependencies]
 serde_json = { workspace = true }
+blake3 = { workspace = true }

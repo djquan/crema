@@ -1,15 +1,15 @@
 [package]
-name = "photors-catalog"
+name = "crema-core"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
 
 [dependencies]
-photors-core = { workspace = true }
-photors-metadata = { workspace = true }
-rusqlite = { workspace = true }
+rawler = { workspace = true }
+image = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
 serde_json = { workspace = true }
-blake3 = { workspace = true }

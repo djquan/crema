@@ -155,7 +155,7 @@ impl Catalog {
     pub fn save_edits(
         &self,
         photo_id: PhotoId,
-        params: &photors_core::image_buf::EditParams,
+        params: &crema_core::image_buf::EditParams,
     ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO edits (photo_id, exposure, wb_temp, wb_tint, crop_x, crop_y, crop_w, crop_h)
@@ -317,7 +317,7 @@ mod tests {
 
         let id = catalog.insert_photo(&photo).unwrap().unwrap();
 
-        let params = photors_core::image_buf::EditParams {
+        let params = crema_core::image_buf::EditParams {
             exposure: 1.5,
             wb_temp: 6500.0,
             wb_tint: -5.0,
@@ -396,13 +396,13 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let params1 = photors_core::image_buf::EditParams {
+        let params1 = crema_core::image_buf::EditParams {
             exposure: 1.0,
             ..Default::default()
         };
         catalog.save_edits(id, &params1).unwrap();
 
-        let params2 = photors_core::image_buf::EditParams {
+        let params2 = crema_core::image_buf::EditParams {
             exposure: 2.0,
             ..Default::default()
         };
@@ -446,7 +446,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let params = photors_core::image_buf::EditParams {
+        let params = crema_core::image_buf::EditParams {
             exposure: -2.0,
             wb_temp: 8000.0,
             wb_tint: 15.0,

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use iced::widget::{Space, button, column, container, image, row, text};
 use iced::{Element, Length};
 
-use photors_catalog::models::{Photo, PhotoId};
+use crema_catalog::models::{Photo, PhotoId};
 
 use crate::app::Message;
 

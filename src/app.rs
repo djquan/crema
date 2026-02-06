@@ -4,10 +4,10 @@ use std::sync::Arc;
 use iced::{Element, Task, Theme};
 use tracing::{error, info};
 
-use photors_catalog::db::Catalog;
-use photors_catalog::models::{Photo, PhotoId};
-use photors_core::image_buf::{EditParams, ImageBuf};
-use photors_thumbnails::cache::ThumbnailCache;
+use crema_catalog::db::Catalog;
+use crema_catalog::models::{Photo, PhotoId};
+use crema_core::image_buf::{EditParams, ImageBuf};
+use crema_thumbnails::cache::ThumbnailCache;
 
 use crate::views;
 use crate::widgets::histogram::HistogramData;
@@ -91,9 +91,9 @@ impl App {
             histogram: None,
             edit_params: EditParams::default(),
             current_exif: Vec::new(),
-            status_message: "Welcome to Photors. Import a folder to get started.".into(),
+            status_message: "Welcome to Crema. Import a folder to get started.".into(),
             processing_generation: 0,
-            thumbnail_cache_dir: dirs::cache_dir().map(|d| d.join("photors").join("thumbnails")),
+            thumbnail_cache_dir: dirs::cache_dir().map(|d| d.join("crema").join("thumbnails")),
         };
 
         let default_catalog = dirs_catalog_path();
@@ -104,7 +104,7 @@ impl App {
 
     pub fn title(&self) -> String {
         match &self.view {
-            View::Lighttable => format!("Photors - {} photos", self.photos.len()),
+            View::Lighttable => format!("Crema - {} photos", self.photos.len()),
             View::Darkroom(id) => {
                 let name = self
                     .photos
@@ -118,7 +118,7 @@ impl App {
                             .to_string()
                     })
                     .unwrap_or_default();
-                format!("Photors - {name}")
+                format!("Crema - {name}")
             }
         }
     }
@@ -163,7 +163,7 @@ impl App {
                     async move {
                         let catalog = Catalog::open(&catalog_path).ok();
                         if let Some(catalog) = catalog {
-                            match photors_catalog::import::import_folder(&catalog, &folder) {
+                            match crema_catalog::import::import_folder(&catalog, &folder) {
                                 Ok(result) => (result.imported.len(), result.errors.len()),
                                 Err(_) => (0, 1),
                             }
@@ -236,9 +236,9 @@ impl App {
                         async move {
                             let t0 = std::time::Instant::now();
                             let p = std::path::Path::new(&path);
-                            let buf = photors_core::raw::load_any(p).ok()?;
+                            let buf = crema_core::raw::load_any(p).ok()?;
                             let preview = buf.downsample(2048);
-                            let exif = photors_metadata::exif::ExifData::from_file(p)
+                            let exif = crema_metadata::exif::ExifData::from_file(p)
                                 .ok()
                                 .map(|e| e.summary_lines())
                                 .unwrap_or_default();
@@ -354,7 +354,7 @@ impl App {
 
         Task::perform(
             async move {
-                let pipeline = photors_core::pipeline::Pipeline::new();
+                let pipeline = crema_core::pipeline::Pipeline::new();
                 let owned = ImageBuf::clone(&buf);
                 let result = pipeline.process_cpu(owned, &params);
                 let (w, h, rgba) = match result {
@@ -417,7 +417,7 @@ impl App {
 fn dirs_catalog_path() -> String {
     let data_dir = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("photors");
+        .join("crema");
     std::fs::create_dir_all(&data_dir).ok();
     data_dir.join("catalog.db").to_string_lossy().to_string()
 }
@@ -446,10 +446,10 @@ fn load_thumbnail_bytes(
         if let Some(bytes) = cache.load(&key) {
             return Ok(bytes);
         }
-        let bytes = photors_thumbnails::generator::fast_thumbnail(p)?;
+        let bytes = crema_thumbnails::generator::fast_thumbnail(p)?;
         cache.store(&key, &bytes).ok();
         return Ok(bytes);
     }
 
-    photors_thumbnails::generator::fast_thumbnail(p)
+    crema_thumbnails::generator::fast_thumbnail(p)
 }

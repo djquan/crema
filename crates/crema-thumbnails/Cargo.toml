@@ -1,15 +1,12 @@
 [package]
-name = "photors-core"
+name = "crema-thumbnails"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
 
 [dependencies]
-rawler = { workspace = true }
+crema-core = { workspace = true }
 image = { workspace = true }
+blake3 = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-serde = { workspace = true }
-
-[dev-dependencies]
-serde_json = { workspace = true }

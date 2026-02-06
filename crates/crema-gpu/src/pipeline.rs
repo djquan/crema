@@ -1,7 +1,7 @@
 use anyhow::Result;
 use tracing::debug;
 
-use photors_core::image_buf::EditParams;
+use crema_core::image_buf::EditParams;
 
 use crate::context::GpuContext;
 use crate::shader::ShaderManager;

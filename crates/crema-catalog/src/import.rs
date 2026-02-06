@@ -7,7 +7,7 @@ use tracing::{info, warn};
 
 use crate::db::{Catalog, InsertPhoto};
 use crate::models::PhotoId;
-use photors_metadata::exif::ExifData;
+use crema_metadata::exif::ExifData;
 
 pub struct ImportResult {
     pub imported: Vec<PhotoId>,
@@ -45,7 +45,7 @@ pub fn import_folder(catalog: &Catalog, folder: &Path) -> Result<ImportResult> {
 
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-        if !photors_core::raw::is_supported_extension(ext) {
+        if !crema_core::raw::is_supported_extension(ext) {
             continue;
         }
 

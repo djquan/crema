@@ -1,7 +1,7 @@
 use iced::Element;
 use iced::widget::{column, container, row, slider, text};
 
-use photors_core::image_buf::EditParams;
+use crema_core::image_buf::EditParams;
 
 use crate::app::Message;
 

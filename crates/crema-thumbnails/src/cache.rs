@@ -59,7 +59,7 @@ mod tests {
 
     #[test]
     fn store_and_load_thumbnail() {
-        let dir = env::temp_dir().join("photors_cache_test");
+        let dir = env::temp_dir().join("crema_cache_test");
         let _ = fs::remove_dir_all(&dir);
         let cache = ThumbnailCache::new(dir.clone()).unwrap();
 
@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn load_missing_returns_none() {
-        let dir = env::temp_dir().join("photors_cache_test_miss");
+        let dir = env::temp_dir().join("crema_cache_test_miss");
         let _ = fs::remove_dir_all(&dir);
         let cache = ThumbnailCache::new(dir.clone()).unwrap();
 
@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn subdirectory_bucketing() {
-        let dir = env::temp_dir().join("photors_cache_test_bucket");
+        let dir = env::temp_dir().join("crema_cache_test_bucket");
         let _ = fs::remove_dir_all(&dir);
         let cache = ThumbnailCache::new(dir.clone()).unwrap();
 
@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn overwrite_existing_thumbnail() {
-        let dir = env::temp_dir().join("photors_cache_test_overwrite");
+        let dir = env::temp_dir().join("crema_cache_test_overwrite");
         let _ = fs::remove_dir_all(&dir);
         let cache = ThumbnailCache::new(dir.clone()).unwrap();
 
@@ -120,7 +120,7 @@ mod tests {
 
     #[test]
     fn cache_dir_accessor() {
-        let dir = env::temp_dir().join("photors_cache_test_accessor");
+        let dir = env::temp_dir().join("crema_cache_test_accessor");
         let _ = fs::remove_dir_all(&dir);
         let cache = ThumbnailCache::new(dir.clone()).unwrap();
         assert_eq!(cache.cache_dir(), dir.as_path());

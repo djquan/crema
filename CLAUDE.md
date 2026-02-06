@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 cargo build --workspace          # build everything
-cargo test --workspace           # run all 52 tests
-cargo test -p photors-core       # test a single crate
-cargo test -p photors-catalog -- db::tests::save_and_load_edits  # single test
+cargo test --workspace           # run all tests
+cargo test -p crema-core         # test a single crate
+cargo test -p crema-catalog -- db::tests::save_and_load_edits  # single test
 cargo clippy --workspace         # lint (CI runs with -D warnings)
 cargo run                        # launch the GUI app
 RUST_LOG=debug cargo run         # launch with verbose logging
@@ -18,7 +18,7 @@ Linux requires: `sudo apt-get install libwayland-dev libxkbcommon-dev`
 
 ## Architecture
 
-Photors is a GPU-accelerated photo editor structured as a Cargo workspace with five library crates and one binary crate.
+Crema is a GPU-accelerated photo editor structured as a Cargo workspace with five library crates and one binary crate.
 
 ### Data Flow
 
@@ -31,22 +31,22 @@ RAW/JPEG file
   -> iced image widget
 ```
 
-All pixel processing happens in **linear light f32**. The `ImageBuf` type (`photors-core/src/image_buf.rs`) is the universal pixel container. sRGB gamma is only applied at the final display step. rawler's output comes back in sRGB gamma, so `raw.rs` immediately converts to linear.
+All pixel processing happens in **linear light f32**. The `ImageBuf` type (`crema-core/src/image_buf.rs`) is the universal pixel container. sRGB gamma is only applied at the final display step. rawler's output comes back in sRGB gamma, so `raw.rs` immediately converts to linear.
 
 ### Crate Dependency Graph
 
 ```
-photors (binary, iced app)
-  ├── photors-core       (ImageBuf, Pipeline, ProcessingModule trait, rawler/image loading)
-  ├── photors-gpu        (wgpu context, textures, WGSL compute shaders) -> depends on photors-core
-  ├── photors-catalog    (SQLite via rusqlite, import, models) -> depends on photors-core, photors-metadata
-  ├── photors-metadata   (EXIF reading via kamadak-exif)
-  └── photors-thumbnails (blake3 disk cache, resize) -> depends on photors-core
+crema (binary, iced app)
+  ├── crema-core       (ImageBuf, Pipeline, ProcessingModule trait, rawler/image loading)
+  ├── crema-gpu        (wgpu context, textures, WGSL compute shaders) -> depends on crema-core
+  ├── crema-catalog    (SQLite via rusqlite, import, models) -> depends on crema-core, crema-metadata
+  ├── crema-metadata   (EXIF reading via kamadak-exif)
+  └── crema-thumbnails (blake3 disk cache, resize) -> depends on crema-core
 ```
 
 ### Processing Pipeline
 
-The `ProcessingModule` trait (`photors-core/src/pipeline/module.rs`) defines one method: `process_cpu(&self, input: &ImageBuf, params: &EditParams) -> Result<ImageBuf>`. Modules are chained in `Pipeline::new()`. The GPU pipeline (`photors-gpu/src/pipeline.rs`) mirrors this with WGSL compute shaders in `crates/photors-gpu/shaders/`.
+The `ProcessingModule` trait (`crema-core/src/pipeline/module.rs`) defines one method: `process_cpu(&self, input: ImageBuf, params: &EditParams) -> Result<ImageBuf>`. Modules are chained in `Pipeline::new()`. The GPU pipeline (`crema-gpu/src/pipeline.rs`) mirrors this with WGSL compute shaders in `crates/crema-gpu/shaders/`.
 
 ### iced Application Pattern
 
@@ -65,8 +65,8 @@ The app has two views: `Lighttable` (thumbnail grid) and `Darkroom` (full image 
 
 ### Catalog
 
-SQLite database at `~/.local/share/photors/catalog.db` with two tables: `photos` (file metadata, EXIF) and `edits` (non-destructive edit params per photo). Files are identified by blake3 content hash. The `ON CONFLICT DO NOTHING` on insert deduplicates by file path.
+SQLite database at `~/.local/share/crema/catalog.db` with two tables: `photos` (file metadata, EXIF) and `edits` (non-destructive edit params per photo, UNIQUE on photo_id with proper upsert). Files are identified by blake3 content hash.
 
 ### Thumbnail Cache
 
-Disk cache at configurable path, keyed by blake3 hash of file contents. Files stored as `{hash[0..2]}/{hash}.jpg` for filesystem bucketing.
+Disk cache at configurable path, keyed by blake3 hash of path + modification time. Files stored as `{hash[0..2]}/{hash}.jpg` for filesystem bucketing.

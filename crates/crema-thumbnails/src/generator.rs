@@ -6,7 +6,7 @@ use image::imageops::FilterType;
 use image::{DynamicImage, RgbaImage};
 use tracing::debug;
 
-use photors_core::image_buf::ImageBuf;
+use crema_core::image_buf::ImageBuf;
 
 const THUMBNAIL_LONGEST_EDGE: u32 = 512;
 
@@ -36,7 +36,7 @@ pub fn generate_thumbnail(buf: &ImageBuf) -> Result<Vec<u8>> {
 
 /// Try to load and generate a thumbnail for any supported image file.
 pub fn thumbnail_for_file(path: &Path) -> Result<Vec<u8>> {
-    let buf = photors_core::raw::load_any(path)?;
+    let buf = crema_core::raw::load_any(path)?;
     generate_thumbnail(&buf)
 }
 
@@ -46,7 +46,7 @@ pub fn fast_thumbnail(path: &Path) -> Result<Vec<u8>> {
     // For now, just do a full decode. Extracting embedded JPEGs from RAW
     // is format-specific and can be added later as an optimization.
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if photors_core::raw::is_raw_extension(ext) {
+    if crema_core::raw::is_raw_extension(ext) {
         debug!(?path, "generating thumbnail via full RAW decode");
     }
     thumbnail_for_file(path)

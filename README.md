@@ -1,4 +1,4 @@
-# Photors
+# Crema
 
 A GPU-accelerated photo editor and browser, built in Rust. Think Lightroom, but open source.
 
@@ -32,14 +32,14 @@ cargo run
 ## Architecture
 
 ```
-photors/
+crema/
   src/                          # Binary crate (iced GUI)
   crates/
-    photors-core/               # ImageBuf, processing pipeline, RAW decode
-    photors-gpu/                # wgpu compute shaders for image processing
-    photors-catalog/            # SQLite catalog and folder import
-    photors-metadata/           # EXIF reading
-    photors-thumbnails/         # Thumbnail generation and disk cache
+    crema-core/                 # ImageBuf, processing pipeline, RAW decode
+    crema-gpu/                  # wgpu compute shaders for image processing
+    crema-catalog/              # SQLite catalog and folder import
+    crema-metadata/             # EXIF reading
+    crema-thumbnails/           # Thumbnail generation and disk cache
 ```
 
 The processing pipeline operates entirely in linear f32 RGB (scene-referred). Each edit module implements the `ProcessingModule` trait and transforms an `ImageBuf`. sRGB gamma is only applied at display time.

@@ -37,8 +37,8 @@ pub struct EditRecord {
 }
 
 impl EditRecord {
-    pub fn to_edit_params(&self) -> photors_core::image_buf::EditParams {
-        photors_core::image_buf::EditParams {
+    pub fn to_edit_params(&self) -> crema_core::image_buf::EditParams {
+        crema_core::image_buf::EditParams {
             exposure: self.exposure,
             wb_temp: self.wb_temp,
             wb_tint: self.wb_tint,

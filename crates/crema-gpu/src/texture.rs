@@ -1,5 +1,5 @@
 use anyhow::Result;
-use photors_core::image_buf::ImageBuf;
+use crema_core::image_buf::ImageBuf;
 
 /// A GPU texture holding RGBA f32 image data.
 pub struct GpuTexture {

@@ -899,6 +899,87 @@ dependencies = [
 ]
 
 [[package]]
+name = "crema"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "bytemuck",
+ "crema-catalog",
+ "crema-core",
+ "crema-gpu",
+ "crema-metadata",
+ "crema-thumbnails",
+ "dirs",
+ "iced",
+ "image",
+ "rfd",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wgpu",
+]
+
+[[package]]
+name = "crema-catalog"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "crema-core",
+ "crema-metadata",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "crema-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "image",
+ "rawler",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "crema-gpu"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "crema-core",
+ "tracing",
+ "wgpu",
+]
+
+[[package]]
+name = "crema-metadata"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "kamadak-exif",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "crema-thumbnails"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "crema-core",
+ "image",
+ "tracing",
+]
+
+[[package]]
 name = "crossbeam-deque"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3331,87 +3412,6 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
-
-[[package]]
-name = "photors"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "bytemuck",
- "dirs",
- "iced",
- "image",
- "photors-catalog",
- "photors-core",
- "photors-gpu",
- "photors-metadata",
- "photors-thumbnails",
- "rfd",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "wgpu",
-]
-
-[[package]]
-name = "photors-catalog"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "photors-core",
- "photors-metadata",
- "rusqlite",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "photors-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "image",
- "rawler",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "photors-gpu"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytemuck",
- "photors-core",
- "tracing",
- "wgpu",
-]
-
-[[package]]
-name = "photors-metadata"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "kamadak-exif",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "photors-thumbnails"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "image",
- "photors-core",
- "tracing",
-]
 
 [[package]]
 name = "pin-project"
