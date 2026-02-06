@@ -1,0 +1,70 @@
+[workspace]
+members = [
+    "crates/photors-core",
+    "crates/photors-gpu",
+    "crates/photors-catalog",
+    "crates/photors-metadata",
+    "crates/photors-thumbnails",
+]
+resolver = "2"
+
+[workspace.dependencies]
+photors-core = { path = "crates/photors-core" }
+photors-gpu = { path = "crates/photors-gpu" }
+photors-catalog = { path = "crates/photors-catalog" }
+photors-metadata = { path = "crates/photors-metadata" }
+photors-thumbnails = { path = "crates/photors-thumbnails" }
+
+rawler = "0.7"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
+wgpu = { version = "27.0", default-features = false, features = ["std", "wgsl"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
+kamadak-exif = "0.6"
+blake3 = "1.8"
+rayon = "1.11"
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytemuck = { version = "1", features = ["derive"] }
+
+[package]
+name = "photors"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "A GPU-accelerated photo editor and browser"
+
+[dependencies]
+photors-core = { workspace = true }
+photors-gpu = { workspace = true }
+photors-catalog = { workspace = true }
+photors-metadata = { workspace = true }
+photors-thumbnails = { workspace = true }
+iced = { version = "0.14", features = ["image", "tokio", "advanced", "canvas"] }
+wgpu = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+bytemuck = { workspace = true }
+image = { workspace = true }
+blake3 = { workspace = true }
+rfd = "0.15"
+dirs = "6"
+
+# Optimize all dependencies even in dev builds. Without this, per-pixel
+# loops in image/jpeg-decoder/rawler run ~10x slower (e.g. 7.5s vs 0.7s
+# to decode a 60MP JPEG). Our own crates stay at opt-level 0 for fast
+# compile + debuginfo.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.photors-core]
+opt-level = 2
+
+[profile.dev.package.photors-thumbnails]
+opt-level = 2

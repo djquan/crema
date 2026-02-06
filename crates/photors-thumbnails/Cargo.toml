@@ -1,0 +1,15 @@
+[package]
+name = "photors-thumbnails"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+
+[dependencies]
+photors-core = { workspace = true }
+image = { workspace = true }
+blake3 = { workspace = true }
+rayon = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }

@@ -1,0 +1,20 @@
+mod app;
+mod views;
+mod widgets;
+
+use tracing_subscriber::EnvFilter;
+
+fn main() -> iced::Result {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    iced::application(app::App::new, app::App::update, app::App::view)
+        .title(app::App::title)
+        .theme(app::App::theme)
+        .window_size(iced::Size::new(1400.0, 900.0))
+        .antialiasing(true)
+        .run()
+}

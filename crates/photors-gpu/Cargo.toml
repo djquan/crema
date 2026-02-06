@@ -1,0 +1,13 @@
+[package]
+name = "photors-gpu"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+
+[dependencies]
+photors-core = { workspace = true }
+wgpu = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytemuck = { workspace = true }
