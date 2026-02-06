@@ -54,6 +54,9 @@ blake3 = { workspace = true }
 rfd = "0.17"
 dirs = "6"
 
+[dev-dependencies]
+tempfile = "3"
+
 # Optimize all dependencies even in dev builds. Without this, per-pixel
 # loops in image/jpeg-decoder/rawler run ~10x slower (e.g. 7.5s vs 0.7s
 # to decode a 60MP JPEG). Our own crates stay at opt-level 0 for fast

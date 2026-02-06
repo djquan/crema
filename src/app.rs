@@ -168,11 +168,10 @@ impl App {
                         .add_filter(
                             "Images",
                             &[
-                                "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2",
-                                "raf", "rw2", "orf", "pef", "dng", "3fr", "ari", "bay",
-                                "cap", "dcr", "erf", "fff", "iiq", "k25", "kdc", "mef",
-                                "mos", "mrw", "raw", "rwl", "srw", "x3f", "jpg", "jpeg",
-                                "png", "tiff", "tif",
+                                "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "raf",
+                                "rw2", "orf", "pef", "dng", "3fr", "ari", "bay", "cap", "dcr",
+                                "erf", "fff", "iiq", "k25", "kdc", "mef", "mos", "mrw", "raw",
+                                "rwl", "srw", "x3f", "jpg", "jpeg", "png", "tiff", "tif",
                             ],
                         );
                     let handles = dialog.pick_files().await.unwrap_or_default();
@@ -597,4 +596,161 @@ fn load_thumbnail_bytes(
     }
 
     crema_thumbnails::generator::fast_thumbnail(p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn test_image() -> ImageBuf {
+        // 4x2 image with known pixel values in linear light
+        let mut data = vec![0.0f32; 4 * 2 * 3];
+        // Top-left: red-ish
+        data[0] = 0.8;
+        data[1] = 0.1;
+        data[2] = 0.1;
+        // Bottom-right: blue-ish
+        let last = data.len() - 3;
+        data[last] = 0.1;
+        data[last + 1] = 0.1;
+        data[last + 2] = 0.8;
+        ImageBuf::from_data(4, 2, data).unwrap()
+    }
+
+    fn test_params() -> EditParams {
+        EditParams {
+            exposure: 0.5,
+            wb_temp: 6000.0,
+            wb_tint: 5.0,
+            ..EditParams::default()
+        }
+    }
+
+    #[test]
+    fn export_jpeg_writes_valid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.jpg");
+
+        let msg = export_image(test_image(), &test_params(), &path);
+
+        assert!(msg.starts_with("Exported to"), "unexpected: {msg}");
+        assert!(path.exists());
+
+        let img = image::open(&path).unwrap();
+        assert_eq!(img.width(), 4);
+        assert_eq!(img.height(), 2);
+    }
+
+    #[test]
+    fn export_jpeg_uppercase_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photo.JPG");
+
+        // .JPG should still go through the JPEG encoder path
+        let msg = export_image(test_image(), &EditParams::default(), &path);
+        assert!(msg.starts_with("Exported to"), "unexpected: {msg}");
+
+        // Verify it's a valid JPEG by reading magic bytes
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[0..2], &[0xFF, 0xD8], "not a JPEG file");
+    }
+
+    #[test]
+    fn export_png_writes_valid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.png");
+
+        let msg = export_image(test_image(), &test_params(), &path);
+
+        assert!(msg.starts_with("Exported to"), "unexpected: {msg}");
+        assert!(path.exists());
+
+        let img = image::open(&path).unwrap();
+        assert_eq!(img.width(), 4);
+        assert_eq!(img.height(), 2);
+
+        // PNG magic bytes
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]);
+    }
+
+    #[test]
+    fn export_tiff_writes_valid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.tiff");
+
+        let msg = export_image(test_image(), &test_params(), &path);
+
+        assert!(msg.starts_with("Exported to"), "unexpected: {msg}");
+        assert!(path.exists());
+
+        let img = image::open(&path).unwrap();
+        assert_eq!(img.width(), 4);
+        assert_eq!(img.height(), 2);
+    }
+
+    #[test]
+    fn export_applies_edits() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Export with default params (no edits)
+        let path_default = dir.path().join("default.png");
+        export_image(test_image(), &EditParams::default(), &path_default);
+
+        // Export with +2 EV exposure boost
+        let bright_params = EditParams {
+            exposure: 2.0,
+            ..EditParams::default()
+        };
+        let path_bright = dir.path().join("bright.png");
+        export_image(test_image(), &bright_params, &path_bright);
+
+        let img_default = image::open(&path_default).unwrap().into_rgba8();
+        let img_bright = image::open(&path_bright).unwrap().into_rgba8();
+
+        // The bright version should have higher pixel values
+        let avg_default: u32 = img_default.pixels().map(|p| p.0[0] as u32).sum();
+        let avg_bright: u32 = img_bright.pixels().map(|p| p.0[0] as u32).sum();
+        assert!(
+            avg_bright > avg_default,
+            "exposure boost should brighten: default={avg_default} bright={avg_bright}"
+        );
+    }
+
+    #[test]
+    fn export_default_params_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.png");
+
+        // A uniform mid-gray image
+        let buf = ImageBuf::from_data(2, 2, vec![0.5; 2 * 2 * 3]).unwrap();
+        export_image(buf, &EditParams::default(), &path);
+
+        let img = image::open(&path).unwrap().into_rgba8();
+        // All pixels should be the same value (uniform input, identity edits)
+        let first = img.pixels().next().unwrap().0;
+        for px in img.pixels() {
+            assert_eq!(px.0, first, "all pixels should be identical");
+        }
+    }
+
+    #[test]
+    fn export_to_nonexistent_dir_fails_gracefully() {
+        let path = Path::new("/nonexistent/dir/photo.jpg");
+        let msg = export_image(test_image(), &EditParams::default(), path);
+        assert!(msg.starts_with("Export failed:"), "unexpected: {msg}");
+    }
+
+    #[test]
+    fn export_message_contains_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.jpg");
+
+        let msg = export_image(test_image(), &EditParams::default(), &path);
+        assert!(
+            msg.contains("result.jpg"),
+            "success message should contain filename: {msg}"
+        );
+    }
 }

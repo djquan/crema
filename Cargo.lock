@@ -870,6 +870,7 @@ dependencies = [
  "iced",
  "image",
  "rfd",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
