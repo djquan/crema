@@ -80,7 +80,7 @@ fn photo_cell<'a>(
         .width(THUMB_SIZE);
 
     button(cell)
-        .on_press(Message::OpenPhoto(photo.id))
+        .on_press(Message::SelectPhoto(photo.id))
         .padding(4)
         .into()
 }

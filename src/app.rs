@@ -14,21 +14,22 @@ use crate::views;
 use crate::widgets::date_sidebar::{DateExpansionKey, DateFilter};
 use crate::widgets::histogram::HistogramData;
 
-#[derive(Debug, Clone)]
-pub enum View {
-    Lighttable,
-    Darkroom(PhotoId),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Grid,
+    Photo,
 }
 
 pub struct App {
     menu: Option<crate::menu::AppMenu>,
-    view: View,
+    view_mode: ViewMode,
+    selected_photo: Option<PhotoId>,
+    right_panel_open: bool,
     catalog: Option<Catalog>,
     catalog_path: Option<String>,
     photos: Vec<Photo>,
     thumbnails: std::collections::HashMap<PhotoId, iced::widget::image::Handle>,
 
-    // Darkroom state
     current_image: Option<Arc<ImageBuf>>,
     preview_image: Option<Arc<ImageBuf>>,
     processed_image: Option<iced::widget::image::Handle>,
@@ -48,8 +49,9 @@ pub struct App {
 #[derive(Debug, Clone)]
 pub enum Message {
     // Navigation
-    OpenPhoto(PhotoId),
-    BackToGrid,
+    SelectPhoto(PhotoId),
+    SetViewMode(ViewMode),
+    ToggleRightPanel,
 
     // Import
     Import,
@@ -72,14 +74,6 @@ pub enum Message {
     AutoEnhance,
     AutoEnhanceComplete(EditParams),
     ResetEdits,
-    #[allow(dead_code)]
-    CropXChanged(f32),
-    #[allow(dead_code)]
-    CropYChanged(f32),
-    #[allow(dead_code)]
-    CropWChanged(f32),
-    #[allow(dead_code)]
-    CropHChanged(f32),
 
     // Image loading
     ImageLoaded(PhotoId, Arc<ImageBuf>, Arc<ImageBuf>, Vec<(String, String)>),
@@ -105,7 +99,9 @@ impl App {
     pub fn new() -> (Self, Task<Message>) {
         let app = Self {
             menu: None,
-            view: View::Lighttable,
+            view_mode: ViewMode::Grid,
+            selected_photo: None,
+            right_panel_open: false,
             catalog: None,
             catalog_path: None,
             photos: Vec::new(),
@@ -130,23 +126,22 @@ impl App {
     }
 
     pub fn title(&self) -> String {
-        match &self.view {
-            View::Lighttable => format!("Crema - {} photos", self.photos.len()),
-            View::Darkroom(id) => {
-                let name = self
-                    .photos
-                    .iter()
-                    .find(|p| p.id == *id)
-                    .map(|p| {
-                        std::path::Path::new(&p.file_path)
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string()
-                    })
-                    .unwrap_or_default();
-                format!("Crema - {name}")
-            }
+        if let Some(id) = self.selected_photo {
+            let name = self
+                .photos
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| {
+                    std::path::Path::new(&p.file_path)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                })
+                .unwrap_or_default();
+            format!("Crema - {name}")
+        } else {
+            format!("Crema - {} photos", self.photos.len())
         }
     }
 
@@ -162,227 +157,31 @@ impl App {
         }
 
         match message {
-            Message::CatalogOpened(path) => {
-                match Catalog::open(&path) {
-                    Ok(catalog) => {
-                        info!(%path, "catalog opened");
-                        self.catalog = Some(catalog);
-                        self.catalog_path = Some(path);
-                        return self.refresh_photos();
-                    }
-                    Err(err) => {
-                        error!(%err, "failed to open catalog");
-                        self.status_message = format!("Error opening catalog: {err}");
-                    }
-                }
-                Task::none()
-            }
-
-            Message::Import => Task::perform(
-                async {
-                    let dialog = rfd::AsyncFileDialog::new()
-                        .set_title("Import photos")
-                        .add_filter(
-                            "Images",
-                            &[
-                                "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "raf",
-                                "rw2", "orf", "pef", "dng", "3fr", "ari", "bay", "cap", "dcr",
-                                "erf", "fff", "iiq", "k25", "kdc", "mef", "mos", "mrw", "raw",
-                                "rwl", "srw", "x3f", "jpg", "jpeg", "png", "tiff", "tif",
-                            ],
-                        );
-                    let handles = dialog.pick_files().await.unwrap_or_default();
-                    handles.iter().map(|h| h.path().to_path_buf()).collect()
-                },
-                Message::ImportsSelected,
-            ),
-
-            Message::ImportsSelected(paths) if paths.is_empty() => Task::none(),
-
-            Message::ImportsSelected(paths) => {
-                self.status_message = format!("Importing {} file(s)...", paths.len());
-                let catalog_path = self.catalog_path.clone().unwrap_or_default();
-                Task::perform(
-                    async move {
-                        let catalog = Catalog::open(&catalog_path).ok();
-                        if let Some(catalog) = catalog {
-                            match crema_catalog::import::import_paths(&catalog, &paths) {
-                                Ok(result) => (result.imported.len(), result.errors.len()),
-                                Err(_) => (0, 1),
-                            }
-                        } else {
-                            (0, 1)
-                        }
-                    },
-                    |(imported, errors)| Message::ImportComplete(imported, errors),
-                )
-            }
-
+            Message::CatalogOpened(path) => self.handle_catalog_opened(path),
+            Message::Import => self.handle_import(),
+            Message::ImportsSelected(paths) => self.handle_imports_selected(paths),
             Message::ImportComplete(imported, errors) => {
-                self.status_message = format!("Imported {imported} photos ({errors} errors)");
-                self.refresh_photos()
+                self.handle_import_complete(imported, errors)
             }
-
-            Message::PhotosListed(photos) => {
-                self.photos = photos;
-                self.status_message = format!("{} photos in catalog", self.photos.len());
-                let cache_dir = self.thumbnail_cache_dir.clone();
-                let tasks: Vec<_> = self
-                    .photos
-                    .iter()
-                    .filter(|p| !self.thumbnails.contains_key(&p.id))
-                    .map(|p| {
-                        let id = p.id;
-                        let path = p.file_path.clone();
-                        let cache_dir = cache_dir.clone();
-                        Task::perform(
-                            async move {
-                                match load_thumbnail_bytes(&path, cache_dir.as_deref()) {
-                                    Ok(bytes) => Some((id, bytes)),
-                                    Err(_) => None,
-                                }
-                            },
-                            |result| match result {
-                                Some((id, bytes)) => Message::ThumbnailReady(id, bytes),
-                                None => Message::Noop,
-                            },
-                        )
-                    })
-                    .collect();
-                Task::batch(tasks)
-            }
-
-            Message::ThumbnailReady(id, bytes) => {
-                let handle = iced::widget::image::Handle::from_bytes(bytes);
-                self.thumbnails.insert(id, handle);
+            Message::PhotosListed(photos) => self.handle_photos_listed(photos),
+            Message::ThumbnailReady(id, bytes) => self.handle_thumbnail_ready(id, bytes),
+            Message::SelectPhoto(id) => self.handle_select_photo(id),
+            Message::SetViewMode(mode) => self.handle_set_view_mode(mode),
+            Message::ToggleRightPanel => {
+                self.right_panel_open = !self.right_panel_open;
                 Task::none()
             }
-
-            Message::OpenPhoto(id) => {
-                self.view = View::Darkroom(id);
-                let photo = self.photos.iter().find(|p| p.id == id).cloned();
-
-                // Load edits from catalog
-                if let Some(ref catalog) = self.catalog {
-                    if let Ok(Some(edit)) = catalog.get_edits(id) {
-                        self.edit_params = edit.to_edit_params();
-                    } else {
-                        self.edit_params = EditParams::default();
-                    }
-                }
-
-                if let Some(photo) = photo {
-                    let path = photo.file_path.clone();
-                    Task::perform(
-                        async move {
-                            let t0 = std::time::Instant::now();
-                            let p = std::path::Path::new(&path);
-                            let buf = crema_core::raw::load_any(p).ok()?;
-                            let preview = buf.downsample(2048);
-                            let exif = crema_metadata::exif::ExifData::from_file(p)
-                                .ok()
-                                .map(|e| e.summary_lines())
-                                .unwrap_or_default();
-                            info!(
-                                elapsed_ms = t0.elapsed().as_millis(),
-                                w = buf.width,
-                                h = buf.height,
-                                "image loaded"
-                            );
-                            Some((id, Arc::new(buf), Arc::new(preview), exif))
-                        },
-                        |result| match result {
-                            Some((id, buf, preview, exif)) => {
-                                Message::ImageLoaded(id, buf, preview, exif)
-                            }
-                            None => Message::Noop,
-                        },
-                    )
-                } else {
-                    Task::none()
-                }
+            Message::ImageLoaded(id, buf, preview, exif) => {
+                self.handle_image_loaded(id, buf, preview, exif)
             }
-
-            Message::ImageLoaded(_id, buf, preview, exif) => {
-                self.current_image = Some(buf);
-                self.preview_image = Some(preview);
-                self.current_exif = exif;
-                if let Some(menu) = &self.menu {
-                    menu.export_item.set_enabled(true);
-                }
-                self.reprocess_image()
-            }
-
             Message::ImageProcessed(generation, handle, hist) => {
-                if generation != self.processing_generation {
-                    return Task::none();
-                }
-                self.processed_image = Some(handle);
-                self.histogram = Some(hist);
-                self.save_current_edits();
-                Task::none()
+                self.handle_image_processed(generation, handle, hist)
             }
-
-            Message::BackToGrid => {
-                self.save_current_edits();
-                self.view = View::Lighttable;
-                self.current_image = None;
-                self.preview_image = None;
-                self.processed_image = None;
-                self.histogram = None;
-                if let Some(menu) = &self.menu {
-                    menu.export_item.set_enabled(false);
-                }
-                Task::none()
-            }
-
-            Message::Export => {
-                let default_name = self.default_export_filename();
-                Task::perform(
-                    async move {
-                        let dialog = rfd::AsyncFileDialog::new()
-                            .set_title("Export photo")
-                            .set_file_name(&default_name)
-                            .add_filter("JPEG", &["jpg", "jpeg"])
-                            .add_filter("PNG", &["png"])
-                            .add_filter("TIFF", &["tiff", "tif"]);
-                        dialog.save_file().await.map(|h| h.path().to_path_buf())
-                    },
-                    |result| match result {
-                        Some(path) => Message::ExportPathSelected(path),
-                        None => Message::Noop,
-                    },
-                )
-            }
-
-            Message::ExportPathSelected(path) => {
-                let Some(ref full_res) = self.current_image else {
-                    return Task::none();
-                };
-                self.status_message = "Exporting...".into();
-                let buf = ImageBuf::clone(full_res);
-                let params = self.edit_params.clone();
-                Task::perform(
-                    async move { export_image(buf, &params, &path) },
-                    Message::ExportComplete,
-                )
-            }
-
-            Message::ExportComplete(msg) => {
-                self.status_message = msg;
-                Task::none()
-            }
-
+            Message::Export => self.handle_export(),
+            Message::ExportPathSelected(path) => self.handle_export_path_selected(path),
+            Message::ExportComplete(msg) => self.handle_export_complete(msg),
             Message::ExposureChanged(v) => {
                 self.edit_params.exposure = v;
-                self.reprocess_image()
-            }
-            Message::WbTempChanged(v) => {
-                self.edit_params.wb_temp = v;
-                self.reprocess_image()
-            }
-            Message::WbTintChanged(v) => {
-                self.edit_params.wb_tint = v;
                 self.reprocess_image()
             }
             Message::ContrastChanged(v) => {
@@ -401,6 +200,14 @@ impl App {
                 self.edit_params.blacks = v;
                 self.reprocess_image()
             }
+            Message::WbTempChanged(v) => {
+                self.edit_params.wb_temp = v;
+                self.reprocess_image()
+            }
+            Message::WbTintChanged(v) => {
+                self.edit_params.wb_tint = v;
+                self.reprocess_image()
+            }
             Message::VibranceChanged(v) => {
                 self.edit_params.vibrance = v;
                 self.reprocess_image()
@@ -409,16 +216,7 @@ impl App {
                 self.edit_params.saturation = v;
                 self.reprocess_image()
             }
-            Message::AutoEnhance => {
-                let Some(ref preview) = self.preview_image else {
-                    return Task::none();
-                };
-                let buf = preview.clone();
-                Task::perform(
-                    async move { crema_core::pipeline::auto_enhance::auto_enhance(&buf) },
-                    Message::AutoEnhanceComplete,
-                )
-            }
+            Message::AutoEnhance => self.handle_auto_enhance(),
             Message::AutoEnhanceComplete(params) => {
                 self.edit_params = params;
                 self.reprocess_image()
@@ -427,37 +225,259 @@ impl App {
                 self.edit_params = EditParams::default();
                 self.reprocess_image()
             }
-            Message::CropXChanged(v) => {
-                self.edit_params.crop_x = v;
-                self.reprocess_image()
-            }
-            Message::CropYChanged(v) => {
-                self.edit_params.crop_y = v;
-                self.reprocess_image()
-            }
-            Message::CropWChanged(v) => {
-                self.edit_params.crop_w = v;
-                self.reprocess_image()
-            }
-            Message::CropHChanged(v) => {
-                self.edit_params.crop_h = v;
-                self.reprocess_image()
-            }
-
             Message::SetDateFilter(f) => {
                 self.date_filter = f;
                 Task::none()
             }
-
             Message::ToggleDateExpansion(key) => {
                 if !self.expanded_dates.remove(&key) {
                     self.expanded_dates.insert(key);
                 }
                 Task::none()
             }
-
             Message::Noop => Task::none(),
         }
+    }
+
+    fn handle_catalog_opened(&mut self, path: String) -> Task<Message> {
+        match Catalog::open(&path) {
+            Ok(catalog) => {
+                info!(%path, "catalog opened");
+                self.catalog = Some(catalog);
+                self.catalog_path = Some(path);
+                self.refresh_photos()
+            }
+            Err(err) => {
+                error!(%err, "failed to open catalog");
+                self.status_message = format!("Error opening catalog: {err}");
+                Task::none()
+            }
+        }
+    }
+
+    fn handle_import(&self) -> Task<Message> {
+        Task::perform(
+            async {
+                let dialog = rfd::AsyncFileDialog::new()
+                    .set_title("Import photos")
+                    .add_filter(
+                        "Images",
+                        &[
+                            "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "raf",
+                            "rw2", "orf", "pef", "dng", "3fr", "ari", "bay", "cap", "dcr",
+                            "erf", "fff", "iiq", "k25", "kdc", "mef", "mos", "mrw", "raw",
+                            "rwl", "srw", "x3f", "jpg", "jpeg", "png", "tiff", "tif",
+                        ],
+                    );
+                let handles = dialog.pick_files().await.unwrap_or_default();
+                handles.iter().map(|h| h.path().to_path_buf()).collect()
+            },
+            Message::ImportsSelected,
+        )
+    }
+
+    fn handle_imports_selected(&mut self, paths: Vec<PathBuf>) -> Task<Message> {
+        if paths.is_empty() {
+            return Task::none();
+        }
+        self.status_message = format!("Importing {} file(s)...", paths.len());
+        let catalog_path = self.catalog_path.clone().unwrap_or_default();
+        Task::perform(
+            async move {
+                let catalog = Catalog::open(&catalog_path).ok();
+                if let Some(catalog) = catalog {
+                    match crema_catalog::import::import_paths(&catalog, &paths) {
+                        Ok(result) => (result.imported.len(), result.errors.len()),
+                        Err(_) => (0, 1),
+                    }
+                } else {
+                    (0, 1)
+                }
+            },
+            |(imported, errors)| Message::ImportComplete(imported, errors),
+        )
+    }
+
+    fn handle_import_complete(&mut self, imported: usize, errors: usize) -> Task<Message> {
+        self.status_message = format!("Imported {imported} photos ({errors} errors)");
+        self.refresh_photos()
+    }
+
+    fn handle_photos_listed(&mut self, photos: Vec<Photo>) -> Task<Message> {
+        self.photos = photos;
+        self.status_message = format!("{} photos in catalog", self.photos.len());
+        let cache_dir = self.thumbnail_cache_dir.clone();
+        let tasks: Vec<_> = self
+            .photos
+            .iter()
+            .filter(|p| !self.thumbnails.contains_key(&p.id))
+            .map(|p| {
+                let id = p.id;
+                let path = p.file_path.clone();
+                let cache_dir = cache_dir.clone();
+                Task::perform(
+                    async move {
+                        match load_thumbnail_bytes(&path, cache_dir.as_deref()) {
+                            Ok(bytes) => Some((id, bytes)),
+                            Err(_) => None,
+                        }
+                    },
+                    |result| match result {
+                        Some((id, bytes)) => Message::ThumbnailReady(id, bytes),
+                        None => Message::Noop,
+                    },
+                )
+            })
+            .collect();
+        Task::batch(tasks)
+    }
+
+    fn handle_thumbnail_ready(&mut self, id: PhotoId, bytes: Vec<u8>) -> Task<Message> {
+        let handle = iced::widget::image::Handle::from_bytes(bytes);
+        self.thumbnails.insert(id, handle);
+        Task::none()
+    }
+
+    fn handle_select_photo(&mut self, id: PhotoId) -> Task<Message> {
+        if self.selected_photo == Some(id) {
+            self.view_mode = ViewMode::Photo;
+            return Task::none();
+        }
+
+        self.save_current_edits();
+
+        self.selected_photo = Some(id);
+        self.view_mode = ViewMode::Photo;
+        self.current_image = None;
+        self.preview_image = None;
+        self.processed_image = None;
+        self.histogram = None;
+
+        if let Some(ref catalog) = self.catalog {
+            if let Ok(Some(edit)) = catalog.get_edits(id) {
+                self.edit_params = edit.to_edit_params();
+            } else {
+                self.edit_params = EditParams::default();
+            }
+        }
+
+        let photo = self.photos.iter().find(|p| p.id == id).cloned();
+        let Some(photo) = photo else {
+            return Task::none();
+        };
+        let path = photo.file_path.clone();
+        Task::perform(
+            async move {
+                let t0 = std::time::Instant::now();
+                let p = std::path::Path::new(&path);
+                let buf = crema_core::raw::load_any(p).ok()?;
+                let preview = buf.downsample(2048);
+                let exif = crema_metadata::exif::ExifData::from_file(p)
+                    .ok()
+                    .map(|e| e.summary_lines())
+                    .unwrap_or_default();
+                info!(
+                    elapsed_ms = t0.elapsed().as_millis(),
+                    w = buf.width,
+                    h = buf.height,
+                    "image loaded"
+                );
+                Some((id, Arc::new(buf), Arc::new(preview), exif))
+            },
+            |result| match result {
+                Some((id, buf, preview, exif)) => Message::ImageLoaded(id, buf, preview, exif),
+                None => Message::Noop,
+            },
+        )
+    }
+
+    fn handle_set_view_mode(&mut self, mode: ViewMode) -> Task<Message> {
+        if mode == ViewMode::Grid && self.view_mode == ViewMode::Photo {
+            self.save_current_edits();
+        }
+        self.view_mode = mode;
+        self.update_export_enabled();
+        Task::none()
+    }
+
+    fn handle_image_loaded(
+        &mut self,
+        id: PhotoId,
+        buf: Arc<ImageBuf>,
+        preview: Arc<ImageBuf>,
+        exif: Vec<(String, String)>,
+    ) -> Task<Message> {
+        if self.selected_photo != Some(id) {
+            return Task::none();
+        }
+        self.current_image = Some(buf);
+        self.preview_image = Some(preview);
+        self.current_exif = exif;
+        self.update_export_enabled();
+        self.reprocess_image()
+    }
+
+    fn handle_image_processed(
+        &mut self,
+        generation: u64,
+        handle: iced::widget::image::Handle,
+        hist: Box<HistogramData>,
+    ) -> Task<Message> {
+        if generation != self.processing_generation {
+            return Task::none();
+        }
+        self.processed_image = Some(handle);
+        self.histogram = Some(hist);
+        self.save_current_edits();
+        Task::none()
+    }
+
+    fn handle_export(&self) -> Task<Message> {
+        let default_name = self.default_export_filename();
+        Task::perform(
+            async move {
+                let dialog = rfd::AsyncFileDialog::new()
+                    .set_title("Export photo")
+                    .set_file_name(&default_name)
+                    .add_filter("JPEG", &["jpg", "jpeg"])
+                    .add_filter("PNG", &["png"])
+                    .add_filter("TIFF", &["tiff", "tif"]);
+                dialog.save_file().await.map(|h| h.path().to_path_buf())
+            },
+            |result| match result {
+                Some(path) => Message::ExportPathSelected(path),
+                None => Message::Noop,
+            },
+        )
+    }
+
+    fn handle_export_path_selected(&mut self, path: PathBuf) -> Task<Message> {
+        let Some(ref full_res) = self.current_image else {
+            return Task::none();
+        };
+        self.status_message = "Exporting...".into();
+        let buf = ImageBuf::clone(full_res);
+        let params = self.edit_params.clone();
+        Task::perform(
+            async move { export_image(buf, &params, &path) },
+            Message::ExportComplete,
+        )
+    }
+
+    fn handle_export_complete(&mut self, msg: String) -> Task<Message> {
+        self.status_message = msg;
+        Task::none()
+    }
+
+    fn handle_auto_enhance(&self) -> Task<Message> {
+        let Some(ref preview) = self.preview_image else {
+            return Task::none();
+        };
+        let buf = preview.clone();
+        Task::perform(
+            async move { crema_core::pipeline::auto_enhance::auto_enhance(&buf) },
+            Message::AutoEnhanceComplete,
+        )
     }
 
     pub fn subscription(&self) -> iced::Subscription<Message> {
@@ -465,10 +485,7 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        match &self.view {
-            View::Lighttable => views::lighttable::view(self),
-            View::Darkroom(_) => views::darkroom::view(self),
-        }
+        views::unified::view(self)
     }
 
     fn refresh_photos(&self) -> Task<Message> {
@@ -520,10 +537,17 @@ impl App {
     }
 
     fn save_current_edits(&self) {
-        if let (View::Darkroom(id), Some(catalog)) = (&self.view, &self.catalog)
-            && let Err(err) = catalog.save_edits(*id, &self.edit_params)
+        if let (Some(id), Some(catalog)) = (self.selected_photo, &self.catalog)
+            && let Err(err) = catalog.save_edits(id, &self.edit_params)
         {
             error!(%err, "failed to save edits");
+        }
+    }
+
+    fn update_export_enabled(&self) {
+        if let Some(menu) = &self.menu {
+            let enabled = self.selected_photo.is_some() && self.current_image.is_some();
+            menu.export_item.set_enabled(enabled);
         }
     }
 
@@ -574,9 +598,21 @@ impl App {
             .collect()
     }
 
+    pub fn view_mode(&self) -> ViewMode {
+        self.view_mode
+    }
+
+    pub fn selected_photo(&self) -> Option<PhotoId> {
+        self.selected_photo
+    }
+
+    pub fn right_panel_open(&self) -> bool {
+        self.right_panel_open
+    }
+
     fn default_export_filename(&self) -> String {
-        if let View::Darkroom(id) = &self.view
-            && let Some(photo) = self.photos.iter().find(|p| p.id == *id)
+        if let Some(id) = self.selected_photo
+            && let Some(photo) = self.photos.iter().find(|p| p.id == id)
             && let Some(stem) = std::path::Path::new(&photo.file_path)
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -673,13 +709,10 @@ mod tests {
     use std::path::Path;
 
     fn test_image() -> ImageBuf {
-        // 4x2 image with known pixel values in linear light
         let mut data = vec![0.0f32; 4 * 2 * 3];
-        // Top-left: red-ish
         data[0] = 0.8;
         data[1] = 0.1;
         data[2] = 0.1;
-        // Bottom-right: blue-ish
         let last = data.len() - 3;
         data[last] = 0.1;
         data[last + 1] = 0.1;
@@ -716,11 +749,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("photo.JPG");
 
-        // .JPG should still go through the JPEG encoder path
         let msg = export_image(test_image(), &EditParams::default(), &path);
         assert!(msg.starts_with("Exported to"), "unexpected: {msg}");
 
-        // Verify it's a valid JPEG by reading magic bytes
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[0..2], &[0xFF, 0xD8], "not a JPEG file");
     }
@@ -739,7 +770,6 @@ mod tests {
         assert_eq!(img.width(), 4);
         assert_eq!(img.height(), 2);
 
-        // PNG magic bytes
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]);
     }
@@ -763,11 +793,9 @@ mod tests {
     fn export_applies_edits() {
         let dir = tempfile::tempdir().unwrap();
 
-        // Export with default params (no edits)
         let path_default = dir.path().join("default.png");
         export_image(test_image(), &EditParams::default(), &path_default);
 
-        // Export with +2 EV exposure boost
         let bright_params = EditParams {
             exposure: 2.0,
             ..EditParams::default()
@@ -778,7 +806,6 @@ mod tests {
         let img_default = image::open(&path_default).unwrap().into_rgba8();
         let img_bright = image::open(&path_bright).unwrap().into_rgba8();
 
-        // The bright version should have higher pixel values
         let avg_default: u32 = img_default.pixels().map(|p| p.0[0] as u32).sum();
         let avg_bright: u32 = img_bright.pixels().map(|p| p.0[0] as u32).sum();
         assert!(
@@ -792,12 +819,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("identity.png");
 
-        // A uniform mid-gray image
         let buf = ImageBuf::from_data(2, 2, vec![0.5; 2 * 2 * 3]).unwrap();
         export_image(buf, &EditParams::default(), &path);
 
         let img = image::open(&path).unwrap().into_rgba8();
-        // All pixels should be the same value (uniform input, identity edits)
         let first = img.pixels().next().unwrap().0;
         for px in img.pixels() {
             assert_eq!(px.0, first, "all pixels should be identical");
