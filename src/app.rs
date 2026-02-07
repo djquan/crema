@@ -263,10 +263,10 @@ impl App {
                     .add_filter(
                         "Images",
                         &[
-                            "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "raf",
-                            "rw2", "orf", "pef", "dng", "3fr", "ari", "bay", "cap", "dcr",
-                            "erf", "fff", "iiq", "k25", "kdc", "mef", "mos", "mrw", "raw",
-                            "rwl", "srw", "x3f", "jpg", "jpeg", "png", "tiff", "tif",
+                            "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "raf", "rw2",
+                            "orf", "pef", "dng", "3fr", "ari", "bay", "cap", "dcr", "erf", "fff",
+                            "iiq", "k25", "kdc", "mef", "mos", "mrw", "raw", "rwl", "srw", "x3f",
+                            "jpg", "jpeg", "png", "tiff", "tif",
                         ],
                     );
                 let handles = dialog.pick_files().await.unwrap_or_default();

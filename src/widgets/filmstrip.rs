@@ -21,19 +21,20 @@ pub fn view<'a>(
         .map(|photo| {
             let is_selected = selected == Some(photo.id);
 
-            let thumb_content: Element<'a, Message> = if let Some(handle) = thumbnails.get(&photo.id) {
-                image(handle.clone())
-                    .width(THUMB_SIZE)
-                    .height(THUMB_SIZE)
-                    .into()
-            } else {
-                container(text("...").size(10))
-                    .width(THUMB_SIZE)
-                    .height(THUMB_SIZE)
-                    .center_x(THUMB_SIZE)
-                    .center_y(THUMB_SIZE)
-                    .into()
-            };
+            let thumb_content: Element<'a, Message> =
+                if let Some(handle) = thumbnails.get(&photo.id) {
+                    image(handle.clone())
+                        .width(THUMB_SIZE)
+                        .height(THUMB_SIZE)
+                        .into()
+                } else {
+                    container(text("...").size(10))
+                        .width(THUMB_SIZE)
+                        .height(THUMB_SIZE)
+                        .center_x(THUMB_SIZE)
+                        .center_y(THUMB_SIZE)
+                        .into()
+                };
 
             let border = if is_selected {
                 Border {

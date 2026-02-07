@@ -6,9 +6,7 @@ use crate::app::{App, Message, ViewMode};
 use crate::widgets;
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    let mut content = column![]
-        .width(Length::Fill)
-        .height(Length::Fill);
+    let mut content = column![].width(Length::Fill).height(Length::Fill);
 
     content = content.push(toolbar(app));
 
