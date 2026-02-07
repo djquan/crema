@@ -62,6 +62,23 @@ impl Catalog {
             CREATE INDEX IF NOT EXISTS idx_photos_hash ON photos(file_hash);
             ",
         )?;
+
+        let alter_stmts = [
+            "ALTER TABLE edits ADD COLUMN contrast REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE edits ADD COLUMN highlights REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE edits ADD COLUMN shadows REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE edits ADD COLUMN blacks REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE edits ADD COLUMN vibrance REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE edits ADD COLUMN saturation REAL NOT NULL DEFAULT 0.0",
+        ];
+        for stmt in alter_stmts {
+            match self.conn.execute(stmt, []) {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("duplicate column") => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+
         Ok(())
     }
 
@@ -132,6 +149,7 @@ impl Catalog {
     pub fn get_edits(&self, photo_id: PhotoId) -> Result<Option<EditRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, photo_id, exposure, wb_temp, wb_tint,
+                    contrast, highlights, shadows, blacks, vibrance, saturation,
                     crop_x, crop_y, crop_w, crop_h, updated_at
              FROM edits WHERE photo_id = ?1",
         )?;
@@ -142,11 +160,17 @@ impl Catalog {
                 exposure: row.get(2)?,
                 wb_temp: row.get(3)?,
                 wb_tint: row.get(4)?,
-                crop_x: row.get(5)?,
-                crop_y: row.get(6)?,
-                crop_w: row.get(7)?,
-                crop_h: row.get(8)?,
-                updated_at: row.get(9)?,
+                contrast: row.get(5)?,
+                highlights: row.get(6)?,
+                shadows: row.get(7)?,
+                blacks: row.get(8)?,
+                vibrance: row.get(9)?,
+                saturation: row.get(10)?,
+                crop_x: row.get(11)?,
+                crop_y: row.get(12)?,
+                crop_w: row.get(13)?,
+                crop_h: row.get(14)?,
+                updated_at: row.get(15)?,
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -158,12 +182,20 @@ impl Catalog {
         params: &crema_core::image_buf::EditParams,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO edits (photo_id, exposure, wb_temp, wb_tint, crop_x, crop_y, crop_w, crop_h)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO edits (photo_id, exposure, wb_temp, wb_tint,
+                                contrast, highlights, shadows, blacks, vibrance, saturation,
+                                crop_x, crop_y, crop_w, crop_h)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(photo_id) DO UPDATE SET
                 exposure = excluded.exposure,
                 wb_temp = excluded.wb_temp,
                 wb_tint = excluded.wb_tint,
+                contrast = excluded.contrast,
+                highlights = excluded.highlights,
+                shadows = excluded.shadows,
+                blacks = excluded.blacks,
+                vibrance = excluded.vibrance,
+                saturation = excluded.saturation,
                 crop_x = excluded.crop_x,
                 crop_y = excluded.crop_y,
                 crop_w = excluded.crop_w,
@@ -174,6 +206,12 @@ impl Catalog {
                 params.exposure,
                 params.wb_temp,
                 params.wb_tint,
+                params.contrast,
+                params.highlights,
+                params.shadows,
+                params.blacks,
+                params.vibrance,
+                params.saturation,
                 params.crop_x,
                 params.crop_y,
                 params.crop_w,
@@ -450,6 +488,12 @@ mod tests {
             exposure: -2.0,
             wb_temp: 8000.0,
             wb_tint: 15.0,
+            contrast: 30.0,
+            highlights: -50.0,
+            shadows: 25.0,
+            blacks: -15.0,
+            vibrance: 20.0,
+            saturation: -10.0,
             crop_x: 0.1,
             crop_y: 0.2,
             crop_w: 0.5,
@@ -461,7 +505,77 @@ mod tests {
         let converted = edit.to_edit_params();
         assert!((converted.exposure - (-2.0)).abs() < 1e-6);
         assert!((converted.wb_temp - 8000.0).abs() < 1e-6);
+        assert!((converted.contrast - 30.0).abs() < 1e-6);
+        assert!((converted.highlights - (-50.0)).abs() < 1e-6);
+        assert!((converted.shadows - 25.0).abs() < 1e-6);
+        assert!((converted.blacks - (-15.0)).abs() < 1e-6);
+        assert!((converted.vibrance - 20.0).abs() < 1e-6);
+        assert!((converted.saturation - (-10.0)).abs() < 1e-6);
         assert!((converted.crop_x - 0.1).abs() < 1e-6);
         assert!((converted.crop_h - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn roundtrip_new_fields() {
+        let catalog = Catalog::open_in_memory().unwrap();
+        let id = catalog
+            .insert_photo(&minimal_photo("/new_fields.jpg"))
+            .unwrap()
+            .unwrap();
+
+        let params = crema_core::image_buf::EditParams {
+            contrast: 25.0,
+            highlights: -30.0,
+            shadows: 40.0,
+            blacks: -10.0,
+            vibrance: 15.0,
+            saturation: -20.0,
+            ..Default::default()
+        };
+        catalog.save_edits(id, &params).unwrap();
+
+        let edit = catalog.get_edits(id).unwrap().unwrap();
+        assert!((edit.contrast - 25.0).abs() < 1e-6);
+        assert!((edit.highlights - (-30.0)).abs() < 1e-6);
+        assert!((edit.shadows - 40.0).abs() < 1e-6);
+        assert!((edit.blacks - (-10.0)).abs() < 1e-6);
+        assert!((edit.vibrance - 15.0).abs() < 1e-6);
+        assert!((edit.saturation - (-20.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn idempotent_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_catalog.db");
+        let path_str = db_path.to_str().unwrap();
+
+        let _catalog1 = Catalog::open(path_str).unwrap();
+        drop(_catalog1);
+        let _catalog2 = Catalog::open(path_str).unwrap();
+    }
+
+    #[test]
+    fn old_edits_get_defaults() {
+        let catalog = Catalog::open_in_memory().unwrap();
+        let id = catalog
+            .insert_photo(&minimal_photo("/old_style.jpg"))
+            .unwrap()
+            .unwrap();
+
+        let params = crema_core::image_buf::EditParams {
+            exposure: 1.0,
+            wb_temp: 5500.0,
+            wb_tint: 0.0,
+            ..Default::default()
+        };
+        catalog.save_edits(id, &params).unwrap();
+
+        let edit = catalog.get_edits(id).unwrap().unwrap();
+        assert!((edit.contrast - 0.0).abs() < 1e-6);
+        assert!((edit.highlights - 0.0).abs() < 1e-6);
+        assert!((edit.shadows - 0.0).abs() < 1e-6);
+        assert!((edit.blacks - 0.0).abs() < 1e-6);
+        assert!((edit.vibrance - 0.0).abs() < 1e-6);
+        assert!((edit.saturation - 0.0).abs() < 1e-6);
     }
 }

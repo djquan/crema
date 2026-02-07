@@ -151,13 +151,21 @@ fn linear_to_srgb_u8(v: f32) -> u8 {
 /// Non-destructive edit parameters for a photo.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EditParams {
-    /// Exposure compensation in EV stops.
     pub exposure: f32,
-    /// White balance color temperature in Kelvin.
     pub wb_temp: f32,
-    /// White balance green-magenta tint.
     pub wb_tint: f32,
-    /// Crop region, normalized 0..1.
+    #[serde(default)]
+    pub contrast: f32,
+    #[serde(default)]
+    pub highlights: f32,
+    #[serde(default)]
+    pub shadows: f32,
+    #[serde(default)]
+    pub blacks: f32,
+    #[serde(default)]
+    pub vibrance: f32,
+    #[serde(default)]
+    pub saturation: f32,
     pub crop_x: f32,
     pub crop_y: f32,
     pub crop_w: f32,
@@ -170,6 +178,12 @@ impl Default for EditParams {
             exposure: 0.0,
             wb_temp: 5500.0,
             wb_tint: 0.0,
+            contrast: 0.0,
+            highlights: 0.0,
+            shadows: 0.0,
+            blacks: 0.0,
+            vibrance: 0.0,
+            saturation: 0.0,
             crop_x: 0.0,
             crop_y: 0.0,
             crop_w: 1.0,
@@ -295,6 +309,12 @@ mod tests {
             exposure: 1.5,
             wb_temp: 6500.0,
             wb_tint: -10.0,
+            contrast: 25.0,
+            highlights: -30.0,
+            shadows: 20.0,
+            blacks: -5.0,
+            vibrance: 15.0,
+            saturation: 10.0,
             crop_x: 0.1,
             crop_y: 0.2,
             crop_w: 0.8,

@@ -61,8 +61,17 @@ pub enum Message {
 
     // Editing
     ExposureChanged(f32),
+    ContrastChanged(f32),
+    HighlightsChanged(f32),
+    ShadowsChanged(f32),
+    BlacksChanged(f32),
     WbTempChanged(f32),
     WbTintChanged(f32),
+    VibranceChanged(f32),
+    SaturationChanged(f32),
+    AutoEnhance,
+    AutoEnhanceComplete(EditParams),
+    ResetEdits,
     #[allow(dead_code)]
     CropXChanged(f32),
     #[allow(dead_code)]
@@ -376,6 +385,48 @@ impl App {
                 self.edit_params.wb_tint = v;
                 self.reprocess_image()
             }
+            Message::ContrastChanged(v) => {
+                self.edit_params.contrast = v;
+                self.reprocess_image()
+            }
+            Message::HighlightsChanged(v) => {
+                self.edit_params.highlights = v;
+                self.reprocess_image()
+            }
+            Message::ShadowsChanged(v) => {
+                self.edit_params.shadows = v;
+                self.reprocess_image()
+            }
+            Message::BlacksChanged(v) => {
+                self.edit_params.blacks = v;
+                self.reprocess_image()
+            }
+            Message::VibranceChanged(v) => {
+                self.edit_params.vibrance = v;
+                self.reprocess_image()
+            }
+            Message::SaturationChanged(v) => {
+                self.edit_params.saturation = v;
+                self.reprocess_image()
+            }
+            Message::AutoEnhance => {
+                let Some(ref preview) = self.preview_image else {
+                    return Task::none();
+                };
+                let buf = preview.clone();
+                Task::perform(
+                    async move { crema_core::pipeline::auto_enhance::auto_enhance(&buf) },
+                    Message::AutoEnhanceComplete,
+                )
+            }
+            Message::AutoEnhanceComplete(params) => {
+                self.edit_params = params;
+                self.reprocess_image()
+            }
+            Message::ResetEdits => {
+                self.edit_params = EditParams::default();
+                self.reprocess_image()
+            }
             Message::CropXChanged(v) => {
                 self.edit_params.crop_x = v;
                 self.reprocess_image()
@@ -486,6 +537,10 @@ impl App {
 
     pub fn edit_params(&self) -> &EditParams {
         &self.edit_params
+    }
+
+    pub fn preview_image(&self) -> Option<&Arc<ImageBuf>> {
+        self.preview_image.as_ref()
     }
 
     pub fn processed_image(&self) -> Option<&iced::widget::image::Handle> {

@@ -1,3 +1,4 @@
+pub mod auto_enhance;
 pub mod module;
 pub mod modules;
 
@@ -25,6 +26,9 @@ impl Pipeline {
             modules: vec![
                 Box::new(modules::WhiteBalance),
                 Box::new(modules::Exposure),
+                Box::new(modules::ToneCurve),
+                Box::new(modules::Vibrance),
+                Box::new(modules::Saturation),
                 Box::new(modules::Crop),
             ],
         }
@@ -116,8 +120,17 @@ mod tests {
     #[test]
     fn module_ordering() {
         let pipeline = Pipeline::new();
-        assert_eq!(pipeline.modules[0].name(), "white_balance");
-        assert_eq!(pipeline.modules[1].name(), "exposure");
-        assert_eq!(pipeline.modules[2].name(), "crop");
+        let names: Vec<&str> = pipeline.modules.iter().map(|m| m.name()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "white_balance",
+                "exposure",
+                "tone_curve",
+                "vibrance",
+                "saturation",
+                "crop",
+            ]
+        );
     }
 }

@@ -39,7 +39,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .center_y(Length::Fill)
     };
 
-    let edit_panel = widgets::edit_panel::view(app.edit_params());
+    let edit_panel = widgets::edit_panel::view(app.edit_params(), app.preview_image().is_some());
     let metadata_panel = widgets::metadata_panel::view(app.current_exif());
     let histogram = widgets::histogram::view(app.histogram());
 
