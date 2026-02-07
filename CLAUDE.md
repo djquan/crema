@@ -47,8 +47,8 @@ crema (binary, iced app)
     └──────────┘     └──────────────┘   │ scene-referred   │              │
                                         │                   │     ┌───────┴──────────┐
     ┌──────────┐     ┌──────────────┐   │ CPU Pipeline:    │     │ iced image widget│
-    │ JPEG/PNG │────>│ image crate  │──>│  WB -> Exp -> Crop│     │ (display)        │
-    │ TIFF     │     │ u8→linear    │   │                   │     └──────────────────┘
+    │ JPEG/PNG │────>│ image crate  │──>│  WB → Exp → Tone →│     │ (display)        │
+    │ TIFF     │     │ u8→linear    │   │  Vib → Sat → Crop │     └──────────────────┘
     └──────────┘     └──────────────┘   └───────────────────┘
                                                │
                                         ┌──────┴───────────┐
@@ -73,7 +73,7 @@ The foundational crate. Three modules:
 - `ImageBuf { width: u32, height: u32, data: Vec<f32> }` (RGB, 3 floats per pixel)
 - `to_rgba_f32()` for GPU upload (adds alpha=1.0), `to_rgba_u8_srgb()` for display
 - `downsample(max_edge)` box-averages to a smaller size (used for 2048px editing preview)
-- `EditParams` holds all edit state: exposure (EV stops), wb_temp (Kelvin), wb_tint, crop (normalized 0..1). Derives `Serialize`/`Deserialize` for SQLite persistence.
+- `EditParams` holds all edit state: exposure (EV stops), wb_temp (Kelvin), wb_tint, contrast, highlights, shadows, blacks, vibrance, saturation, crop (normalized 0..1). Derives `Serialize`/`Deserialize` for SQLite persistence.
 
 **`raw.rs`** — File loading:
 - `RAW_EXTENSIONS`: 27 formats (cr2, cr3, nef, arw, dng, orf, raf, etc.)
@@ -84,11 +84,9 @@ The foundational crate. Three modules:
 
 **`pipeline/`** — Processing chain:
 - `ProcessingModule` trait: `fn process_cpu(&self, input: ImageBuf, params: &EditParams) -> Result<ImageBuf>`
-- `Pipeline::new()` chains: **WhiteBalance -> Exposure -> Crop**
+- `Pipeline::new()` chains: **WhiteBalance -> Exposure -> ToneCurve -> Vibrance -> Saturation -> Crop**
 - Each module has early-return identity checks (e.g. exposure=0 skips processing)
-- WhiteBalance: converts (temp, tint) to per-channel multipliers relative to D55 (5500K). `r_mult = 1.0 + shift*0.3`, `b_mult = 1.0 - shift*0.3`, `g_mult = 1.0 + tint*0.01`, all clamped >= 0.1
-- Exposure: `multiplier = 2^exposure`, applied to all pixels
-- Crop: normalized (0..1) params mapped to pixel coords, copies scanlines to new buffer
+- See **[IMAGE_ADJUSTMENTS.md](IMAGE_ADJUSTMENTS.md)** for detailed math, formulas, constants, and design rationale for every module
 
 ---
 
@@ -198,7 +196,7 @@ Lighttable                              Darkroom
 │ Date   │                    │         │                   │Histogram │
 │ sidebar│  Thumbnail grid    │         │   Processed       ├──────────┤
 │ (tree) │  5 cols x 200px    │         │   image           │Edit panel│
-│        │  click->darkroom   │         │   (fill)          │ 3 sliders│
+│        │  click->darkroom   │         │   (fill)          │ 9 sliders│
 │        │                    │         │                   ├──────────┤
 │        │                    │         │                   │EXIF panel│
 ├────────┴────────────────────┤         ├───────────────────┴──────────┤

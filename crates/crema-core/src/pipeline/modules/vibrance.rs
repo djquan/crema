@@ -47,6 +47,11 @@ impl ProcessingModule for Vibrance {
     }
 }
 
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// Returns 0.0-1.0 indicating how much this pixel looks like a skin tone.
 ///
 /// Computes HSV hue from gamma-encoded (perceptual) RGB so that hue angles
@@ -66,7 +71,7 @@ fn skin_tone_weight(r: f32, g: f32, b: f32) -> f32 {
     }
 
     let hue = if (max_ch - rg).abs() < 1e-6 {
-        60.0 * (((gg - bg) / chroma) % 6.0)
+        60.0 * ((gg - bg) / chroma).rem_euclid(6.0)
     } else if (max_ch - gg).abs() < 1e-6 {
         60.0 * ((bg - rg) / chroma + 2.0)
     } else {
@@ -80,9 +85,9 @@ fn skin_tone_weight(r: f32, g: f32, b: f32) -> f32 {
     if hue >= 350.0 || hue <= 85.0 {
         let h = if hue >= 350.0 { hue - 360.0 } else { hue };
         if h < 5.0 {
-            ((h + 10.0) / 15.0).clamp(0.0, 1.0)
+            smoothstep((h + 10.0) / 15.0)
         } else if h > 55.0 {
-            ((85.0 - h) / 30.0).clamp(0.0, 1.0)
+            smoothstep((85.0 - h) / 30.0)
         } else {
             1.0
         }
@@ -352,6 +357,95 @@ mod tests {
             result.data.iter().all(|v| v.is_finite() && *v >= 0.0),
             "HDR input should produce finite non-negative output: {:?}",
             result.data
+        );
+    }
+
+    #[test]
+    fn negative_100_fully_desaturates_all() {
+        // At -100%, the selectivity formula collapses: all pixels fully
+        // desaturate to luminance regardless of their initial saturation.
+        // This matches SweetFX/ReShade behavior.
+        let saturated = ImageBuf::from_data(1, 1, vec![0.2, 0.2, 0.8]).unwrap();
+        let desaturated = ImageBuf::from_data(1, 1, vec![0.45, 0.45, 0.55]).unwrap();
+
+        let params = EditParams {
+            vibrance: -100.0,
+            ..Default::default()
+        };
+
+        let sat_result = Vibrance.process_cpu(saturated, &params).unwrap();
+        let desat_result = Vibrance.process_cpu(desaturated, &params).unwrap();
+
+        // Both should be at or near grayscale
+        let sat_y = 0.2126 * 0.2 + 0.7152 * 0.2 + 0.0722 * 0.8;
+        for &v in &sat_result.data {
+            assert!(
+                (v - sat_y).abs() < 0.01,
+                "saturated pixel should be near-gray at -100%: {v} vs {sat_y}"
+            );
+        }
+
+        let desat_y = 0.2126 * 0.45 + 0.7152 * 0.45 + 0.0722 * 0.55;
+        for &v in &desat_result.data {
+            assert!(
+                (v - desat_y).abs() < 0.01,
+                "desaturated pixel should be near-gray at -100%: {v} vs {desat_y}"
+            );
+        }
+    }
+
+    #[test]
+    fn skin_tone_weight_dark_skin() {
+        // Very dark skin tone: low absolute values, warm hue.
+        let w = skin_tone_weight(0.03, 0.015, 0.008);
+        assert!(w.is_finite(), "dark skin tone weight should be finite: {w}");
+        // Hue should still be in skin range despite low values
+        assert!(
+            w > 0.0,
+            "dark warm-hued pixel should have some skin protection: {w}"
+        );
+    }
+
+    #[test]
+    fn skin_tone_weight_hdr() {
+        // HDR skin-tone pixel (values above 1.0)
+        let w = skin_tone_weight(2.0, 1.0, 0.5);
+        assert!(w.is_finite(), "HDR skin tone weight should be finite: {w}");
+        assert!(
+            w > 0.0,
+            "HDR warm-hued pixel should have skin protection: {w}"
+        );
+    }
+
+    #[test]
+    fn skin_tone_ramps_are_smooth() {
+        // Sweep through the ramp-out region (55-85 degrees) and verify
+        // no discontinuities. Smoothstep should give C1 continuity.
+        let ramp_pixels: &[(f32, f32, f32)] = &[
+            (0.8, 0.5, 0.2),   // ~30 degrees (plateau, weight=1.0)
+            (0.8, 0.6, 0.2),   // ~40 degrees (plateau)
+            (0.8, 0.7, 0.2),   // ~50 degrees (plateau)
+            (0.75, 0.7, 0.15), // ~55 degrees (start ramp-out)
+            (0.7, 0.7, 0.1),   // ~65 degrees (mid ramp)
+            (0.6, 0.7, 0.1),   // ~75 degrees (late ramp)
+            (0.5, 0.6, 0.1),   // ~80 degrees (near end)
+        ];
+        let mut prev = skin_tone_weight(ramp_pixels[0].0, ramp_pixels[0].1, ramp_pixels[0].2);
+        for &(r, g, b) in &ramp_pixels[1..] {
+            let w = skin_tone_weight(r, g, b);
+            let jump = (w - prev).abs();
+            assert!(
+                jump < 0.5,
+                "skin tone ramp should be smooth: prev={prev} curr={w} jump={jump} at ({r},{g},{b})"
+            );
+            prev = w;
+        }
+        // Verify the ramp is monotonically decreasing in this region
+        let w_55 = skin_tone_weight(0.75, 0.7, 0.15);
+        let w_75 = skin_tone_weight(0.6, 0.7, 0.1);
+        assert!(
+            w_55 > w_75,
+            "weight should decrease through ramp-out: w55={w_55} w75={w_75}"
         );
     }
 }

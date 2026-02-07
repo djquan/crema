@@ -1,4 +1,4 @@
-/// sRGB EOTF (IEC 61966-2-1): linear light [0,1] -> perceptual sRGB [0,1].
+/// Inverse sRGB EOTF (IEC 61966-2-1): linear light [0,1] -> perceptual sRGB [0,1].
 pub fn linear_to_srgb(x: f32) -> f32 {
     if x <= 0.0031308 {
         12.92 * x
@@ -7,7 +7,7 @@ pub fn linear_to_srgb(x: f32) -> f32 {
     }
 }
 
-/// Inverse sRGB EOTF: perceptual sRGB [0,1] -> linear light [0,1].
+/// sRGB EOTF (IEC 61966-2-1): perceptual sRGB [0,1] -> linear light [0,1].
 pub fn srgb_to_linear(x: f32) -> f32 {
     if x <= 0.04045 {
         x / 12.92
@@ -37,7 +37,8 @@ pub fn linear_srgb_to_oklab(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
 }
 
 /// Approximate maximum OKLab chroma for in-gamut sRGB colors.
-pub const OKLAB_MAX_CHROMA: f32 = 0.32;
+/// Actual max is ~0.323 (pure magenta). Rounded up for a clean margin.
+pub const OKLAB_MAX_CHROMA: f32 = 0.33;
 
 #[cfg(test)]
 mod tests {
@@ -149,6 +150,41 @@ mod tests {
                 "{name}: chroma={chroma}, expected ~{expected_chroma}"
             );
         }
+    }
+
+    #[test]
+    fn oklab_max_chroma_covers_gamut() {
+        // OKLAB_MAX_CHROMA should be >= the chroma of all sRGB gamut corners.
+        let corners: &[(f32, f32, f32)] = &[
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (1.0, 1.0, 0.0),
+            (1.0, 0.0, 1.0),
+            (0.0, 1.0, 1.0),
+        ];
+        for &(r, g, b) in corners {
+            let (_, a, ob) = linear_srgb_to_oklab(r, g, b);
+            let chroma = (a * a + ob * ob).sqrt();
+            assert!(
+                chroma <= OKLAB_MAX_CHROMA,
+                "gamut corner ({r},{g},{b}) chroma {chroma} exceeds OKLAB_MAX_CHROMA {}",
+                OKLAB_MAX_CHROMA
+            );
+        }
+    }
+
+    #[test]
+    fn srgb_continuity_at_breakpoint() {
+        // The sRGB transfer function should be continuous at the breakpoint.
+        let bp = 0.0031308_f32;
+        let below = linear_to_srgb(bp - 1e-7);
+        let above = linear_to_srgb(bp + 1e-7);
+        let gap = (above - below).abs();
+        assert!(
+            gap < 1e-4,
+            "sRGB should be continuous at breakpoint: gap={gap}"
+        );
     }
 
     #[test]

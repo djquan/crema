@@ -3,7 +3,7 @@ use crate::image_buf::{EditParams, ImageBuf};
 
 /// Analyze a linear f32 preview and produce edit suggestions.
 ///
-/// Histogram analysis is performed in **perceptual space** (gamma 2.2)
+/// Histogram analysis is performed in **perceptual space** (sRGB EOTF)
 /// where human vision is roughly uniform, making thresholds intuitive.
 ///
 /// Strategy (inspired by pre-ML Lightroom Auto):
@@ -39,7 +39,7 @@ pub fn auto_enhance(buf: &ImageBuf) -> EditParams {
         let b = pixel[2] as f64;
 
         let y_linear = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        luminances.push(y_linear.max(0.0).powf(1.0 / 2.2));
+        luminances.push(linear_to_srgb(y_linear.max(0.0) as f32) as f64);
 
         let max_ch = r.max(g).max(b);
         if max_ch >= 0.02 {
@@ -74,7 +74,7 @@ pub fn auto_enhance(buf: &ImageBuf) -> EditParams {
 
     // ── Exposure ──
     // Target: perceptual mid-gray (~0.46). 45% strength correction.
-    let target_mid = 0.46; // 0.18 linear in gamma 2.2
+    let target_mid = 0.461; // linear_to_srgb(0.18) ≈ 0.4613
     let raw_ev = if p50 > 0.01 {
         (target_mid / p50).log2() * 0.45
     } else {
@@ -150,7 +150,7 @@ pub fn auto_enhance(buf: &ImageBuf) -> EditParams {
     } else {
         0.0
     };
-    let vibrance = ((1.0 - avg_sat) * 25.0).clamp(5.0, 25.0) as f32;
+    let vibrance = ((1.0 - avg_sat) * 25.0).clamp(0.0, 25.0) as f32;
 
     EditParams {
         exposure: ev,
@@ -481,7 +481,7 @@ mod tests {
         assert!((0.0..=70.0).contains(&p.shadows), "shadows {}", p.shadows);
         assert!((-25.0..=0.0).contains(&p.blacks), "blacks {}", p.blacks);
         assert!(
-            (5.0..=25.0).contains(&p.vibrance),
+            (0.0..=25.0).contains(&p.vibrance),
             "vibrance {}",
             p.vibrance
         );
@@ -603,6 +603,77 @@ mod tests {
             params.wb_tint < 0.0,
             "magenta cast should produce negative tint correction: {}",
             params.wb_tint
+        );
+    }
+
+    #[test]
+    fn hdr_input_no_panic() {
+        let buf = uniform_image(2.0, 1.5, 3.0, 10);
+        let params = auto_enhance(&buf);
+        assert!(params.exposure.is_finite());
+        assert!(params.wb_temp.is_finite());
+        assert!(params.highlights.is_finite());
+    }
+
+    #[test]
+    fn saturated_scene_zero_vibrance() {
+        // Highly saturated scene: vibrance should be near zero, not forced to +5.
+        let buf = uniform_image(0.8, 0.1, 0.1, 10);
+        let params = auto_enhance(&buf);
+        assert!(
+            params.vibrance < 5.0,
+            "saturated scene should get low vibrance, got {}",
+            params.vibrance
+        );
+    }
+
+    #[test]
+    fn nearly_clipped_image() {
+        // 99% of pixels near 1.0 (overexposed scene).
+        let size = 10_u32;
+        let pixel_count = (size * size) as usize;
+        let mut data = Vec::with_capacity(pixel_count * 3);
+        for i in 0..pixel_count {
+            let v = if i == 0 { 0.1 } else { 0.95 };
+            data.push(v);
+            data.push(v);
+            data.push(v);
+        }
+        let buf = ImageBuf::from_data(size, size, data).unwrap();
+        let params = auto_enhance(&buf);
+        assert!(
+            params.exposure < 0.0,
+            "nearly clipped image should get negative exposure: {}",
+            params.exposure
+        );
+        assert!(
+            params.highlights < 0.0,
+            "nearly clipped image should recover highlights: {}",
+            params.highlights
+        );
+    }
+
+    #[test]
+    fn end_to_end_auto_then_pipeline() {
+        use crate::pipeline::Pipeline;
+        let buf = scene_image(0.01, 0.15, 0.7, 20);
+        let params = auto_enhance(&buf);
+        let pipeline = Pipeline::new();
+        let output = pipeline.process_cpu(buf, &params).unwrap();
+        assert!(
+            output.data.iter().all(|v| v.is_finite()),
+            "pipeline output should be finite"
+        );
+        // Output should have better tonal distribution
+        let y_sum: f64 = output
+            .data
+            .chunks_exact(3)
+            .map(|p| 0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64)
+            .sum();
+        let avg_y = y_sum / output.pixel_count() as f64;
+        assert!(
+            avg_y > 0.05 && avg_y < 0.8,
+            "auto-enhanced output should have reasonable average luminance: {avg_y}"
         );
     }
 }

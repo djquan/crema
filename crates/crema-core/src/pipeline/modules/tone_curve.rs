@@ -692,4 +692,69 @@ mod tests {
             "R/B ratio should be preserved: {new_rb} vs {orig_rb}"
         );
     }
+
+    #[test]
+    fn lut_lerp_boundaries() {
+        let params = params_with(|p| p.contrast = 30.0);
+        let lut = build_tone_lut(&params);
+        assert!(
+            (lut_lerp(&lut, 0.0) - lut[0]).abs() < 1e-7,
+            "lut_lerp(0) should return lut[0]"
+        );
+        assert!(
+            (lut_lerp(&lut, 1.0) - lut[LUT_SIZE - 1]).abs() < 1e-4,
+            "lut_lerp(1) should return lut[LUT_SIZE-1]"
+        );
+    }
+
+    #[test]
+    fn negative_channel_with_positive_luminance() {
+        // Mixed-sign pixel: one channel negative, luminance still positive.
+        // The tone curve should handle this without panic or NaN.
+        let buf = ImageBuf::from_data(1, 1, vec![-0.1_f32, 0.5, 0.3]).unwrap();
+        let params = params_with(|p| p.contrast = 30.0);
+        let result = ToneCurve.process_cpu(buf, &params).unwrap();
+        assert!(
+            result.data.iter().all(|v| v.is_finite()),
+            "negative channel should not cause NaN: {:?}",
+            result.data
+        );
+    }
+
+    #[test]
+    fn zero_pixels_with_positive_blacks() {
+        // True-zero pixels bypass the LUT (y < 1e-6 skip). With blacks > 0,
+        // pixels at y=0 stay black while very dark pixels get lifted.
+        let buf = uniform(0.0, 0.0, 0.0, 1, 1);
+        let params = params_with(|p| p.blacks = 100.0);
+        let result = ToneCurve.process_cpu(buf, &params).unwrap();
+        assert_eq!(
+            result.data,
+            vec![0.0, 0.0, 0.0],
+            "true-zero pixels should stay zero even with positive blacks"
+        );
+    }
+
+    #[test]
+    fn extreme_exposure_then_tone_curve() {
+        // High exposure pushes values above 1.0; tone curve HDR extension
+        // should handle them gracefully.
+        let buf = uniform(0.5, 0.5, 0.5, 4, 4);
+        let params = EditParams {
+            exposure: 3.0, // 2^3 = 8x, values become 4.0
+            highlights: -80.0,
+            ..Default::default()
+        };
+        // Run exposure manually to get HDR values, then tone curve.
+        use crate::pipeline::module::ProcessingModule;
+        use crate::pipeline::modules::Exposure;
+        let exposed = Exposure.process_cpu(buf, &params).unwrap();
+        assert!(exposed.data[0] > 1.0, "should be HDR after exposure");
+        let result = ToneCurve.process_cpu(exposed, &params).unwrap();
+        assert!(
+            result.data.iter().all(|v| v.is_finite() && *v >= 0.0),
+            "HDR tone curve output should be finite non-negative: {:?}",
+            &result.data[..3]
+        );
+    }
 }

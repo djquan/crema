@@ -144,8 +144,12 @@ static SRGB_LUT: LazyLock<[u8; SRGB_LUT_SIZE]> = LazyLock::new(|| {
 
 fn linear_to_srgb_u8(v: f32) -> u8 {
     let v = v.clamp(0.0, 1.0);
-    let idx = (v * (SRGB_LUT_SIZE - 1) as f32) as usize;
-    SRGB_LUT[idx]
+    let idx_f = v * (SRGB_LUT_SIZE - 1) as f32;
+    let i0 = (idx_f as usize).min(SRGB_LUT_SIZE - 2);
+    let frac = idx_f - i0 as f32;
+    let a = SRGB_LUT[i0] as f32;
+    let b = SRGB_LUT[i0 + 1] as f32;
+    (a + frac * (b - a) + 0.5) as u8
 }
 
 /// Non-destructive edit parameters for a photo.
@@ -325,5 +329,43 @@ mod tests {
         assert!((deserialized.exposure - 1.5).abs() < 1e-6);
         assert!((deserialized.wb_temp - 6500.0).abs() < 1e-6);
         assert!((deserialized.crop_w - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn display_lut_accuracy() {
+        // Verify the LUT-based sRGB conversion matches the exact formula
+        // within 1 code value across the entire range.
+        for i in 0..=1000 {
+            let linear = i as f32 / 1000.0;
+            let lut_val = linear_to_srgb_u8(linear);
+            let exact_srgb = if linear <= 0.0031308 {
+                linear * 12.92
+            } else {
+                1.055 * linear.powf(1.0 / 2.4) - 0.055
+            };
+            let exact_u8 = (exact_srgb * 255.0 + 0.5) as u8;
+            let diff = (lut_val as i32 - exact_u8 as i32).unsigned_abs();
+            assert!(
+                diff <= 1,
+                "LUT error at linear={linear}: LUT={lut_val} exact={exact_u8} diff={diff}"
+            );
+        }
+    }
+
+    #[test]
+    fn display_lut_at_srgb_breakpoint() {
+        // The sRGB transfer function has a breakpoint at 0.0031308 linear.
+        // Verify the LUT produces correct values around this boundary.
+        let below = linear_to_srgb_u8(0.003);
+        let at = linear_to_srgb_u8(0.0031308);
+        let above = linear_to_srgb_u8(0.004);
+        assert!(
+            below <= at,
+            "below breakpoint should be <= at: {below} vs {at}"
+        );
+        assert!(
+            at <= above,
+            "at breakpoint should be <= above: {at} vs {above}"
+        );
     }
 }

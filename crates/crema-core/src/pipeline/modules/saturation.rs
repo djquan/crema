@@ -138,4 +138,38 @@ mod tests {
         assert_eq!(result.width, 10);
         assert_eq!(result.height, 5);
     }
+
+    #[test]
+    fn hdr_input_handled() {
+        let buf = ImageBuf::from_data(1, 1, vec![2.0, 1.5, 0.5]).unwrap();
+        let params = EditParams {
+            saturation: 50.0,
+            ..Default::default()
+        };
+        let result = Saturation.process_cpu(buf, &params).unwrap();
+        assert!(
+            result.data.iter().all(|v| v.is_finite() && *v >= 0.0),
+            "HDR input should produce finite non-negative output: {:?}",
+            result.data
+        );
+    }
+
+    #[test]
+    fn positive_100_doubles_deviation() {
+        let buf = ImageBuf::from_data(1, 1, vec![0.8, 0.3, 0.1]).unwrap();
+        let y = 0.2126 * 0.8 + 0.7152 * 0.3 + 0.0722 * 0.1;
+        let params = EditParams {
+            saturation: 100.0,
+            ..Default::default()
+        };
+        let result = Saturation.process_cpu(buf, &params).unwrap();
+        // At +100%, blend=2.0, so deviation from Y doubles
+        let expected_r = y + 2.0 * (0.8 - y);
+        assert!(
+            (result.data[0] - expected_r).abs() < 1e-5,
+            "saturation +100 should double deviation: got {} expected {}",
+            result.data[0],
+            expected_r
+        );
+    }
 }
