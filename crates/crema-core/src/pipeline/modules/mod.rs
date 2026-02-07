@@ -10,4 +10,4 @@ pub use exposure::Exposure;
 pub use saturation::Saturation;
 pub use tone_curve::ToneCurve;
 pub use vibrance::Vibrance;
-pub use white_balance::WhiteBalance;
+pub use white_balance::{WhiteBalance, wb_matrix};

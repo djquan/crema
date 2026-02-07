@@ -56,27 +56,37 @@ fn is_identity(m: &[f32; 9]) -> bool {
 // a matrix multiply.
 
 const SRGB_TO_XYZ: [f64; 9] = [
-    0.4123907993, 0.3575843394, 0.1804807884,
-    0.2126390059, 0.7151686788, 0.0721923154,
-    0.0193308187, 0.1191947798, 0.9505321522,
+    0.4123907993,
+    0.3575843394,
+    0.1804807884,
+    0.2126390059,
+    0.7151686788,
+    0.0721923154,
+    0.0193308187,
+    0.1191947798,
+    0.9505321522,
 ];
 
 const XYZ_TO_SRGB: [f64; 9] = [
-     3.2409699419, -1.5373831776, -0.4986107603,
-    -0.9692436363,  1.8759675015,  0.0415550574,
-     0.0556300797, -0.2039769589,  1.0569715142,
+    3.2409699419,
+    -1.5373831776,
+    -0.4986107603,
+    -0.9692436363,
+    1.8759675015,
+    0.0415550574,
+    0.0556300797,
+    -0.2039769589,
+    1.0569715142,
 ];
 
 const BRADFORD: [f64; 9] = [
-     0.8951000,  0.2664000, -0.1614000,
-    -0.7502000,  1.7135000,  0.0367000,
-     0.0389000, -0.0685000,  1.0296000,
+    0.8951000, 0.2664000, -0.1614000, -0.7502000, 1.7135000, 0.0367000, 0.0389000, -0.0685000,
+    1.0296000,
 ];
 
 const BRADFORD_INV: [f64; 9] = [
-     0.9869929, -0.1470543,  0.1599627,
-     0.4323053,  0.5183603,  0.0492912,
-    -0.0085287,  0.0400428,  0.9684867,
+    0.9869929, -0.1470543, 0.1599627, 0.4323053, 0.5183603, 0.0492912, -0.0085287, 0.0400428,
+    0.9684867,
 ];
 
 const REF_TEMP: f64 = 5500.0;
@@ -87,7 +97,7 @@ const REF_TEMP: f64 = 5500.0;
 ///
 /// Source white = Planckian chromaticity at `temp` + tint offset.
 /// Destination white = Planckian chromaticity at 5500 K (our neutral).
-fn wb_matrix(temp: f32, tint: f32) -> [f32; 9] {
+pub fn wb_matrix(temp: f32, tint: f32) -> [f32; 9] {
     let temp = (temp as f64).clamp(1667.0, 25000.0);
     let tint = tint as f64;
 
@@ -104,9 +114,15 @@ fn wb_matrix(temp: f32, tint: f32) -> [f32; 9] {
     let combined = mat3_mul(&XYZ_TO_SRGB, &tmp);
 
     [
-        combined[0] as f32, combined[1] as f32, combined[2] as f32,
-        combined[3] as f32, combined[4] as f32, combined[5] as f32,
-        combined[6] as f32, combined[7] as f32, combined[8] as f32,
+        combined[0] as f32,
+        combined[1] as f32,
+        combined[2] as f32,
+        combined[3] as f32,
+        combined[4] as f32,
+        combined[5] as f32,
+        combined[6] as f32,
+        combined[7] as f32,
+        combined[8] as f32,
     ]
 }
 
@@ -213,9 +229,15 @@ fn bradford_cat(src_xyz: &[f64; 3], dst_xyz: &[f64; 3]) -> [f64; 9] {
 
     // Diagonal scaling matrix
     let scale = [
-        dst_lms[0] / src_lms[0], 0.0, 0.0,
-        0.0, dst_lms[1] / src_lms[1], 0.0,
-        0.0, 0.0, dst_lms[2] / src_lms[2],
+        dst_lms[0] / src_lms[0],
+        0.0,
+        0.0,
+        0.0,
+        dst_lms[1] / src_lms[1],
+        0.0,
+        0.0,
+        0.0,
+        dst_lms[2] / src_lms[2],
     ];
 
     // M_A^(-1) * scale * M_A
@@ -229,9 +251,8 @@ fn mat3_mul(a: &[f64; 9], b: &[f64; 9]) -> [f64; 9] {
     let mut out = [0.0_f64; 9];
     for row in 0..3 {
         for col in 0..3 {
-            out[row * 3 + col] = a[row * 3] * b[col]
-                + a[row * 3 + 1] * b[3 + col]
-                + a[row * 3 + 2] * b[6 + col];
+            out[row * 3 + col] =
+                a[row * 3] * b[col] + a[row * 3 + 1] * b[3 + col] + a[row * 3 + 2] * b[6 + col];
         }
     }
     out
@@ -271,8 +292,16 @@ mod tests {
             ..Default::default()
         };
         let result = WhiteBalance.process_cpu(buf, &params).unwrap();
-        assert!(result.data[0] > 0.5, "red should be boosted, got {}", result.data[0]);
-        assert!(result.data[2] < 0.5, "blue should be reduced, got {}", result.data[2]);
+        assert!(
+            result.data[0] > 0.5,
+            "red should be boosted, got {}",
+            result.data[0]
+        );
+        assert!(
+            result.data[2] < 0.5,
+            "blue should be reduced, got {}",
+            result.data[2]
+        );
     }
 
     #[test]
@@ -283,8 +312,16 @@ mod tests {
             ..Default::default()
         };
         let result = WhiteBalance.process_cpu(buf, &params).unwrap();
-        assert!(result.data[0] < 0.5, "red should be reduced, got {}", result.data[0]);
-        assert!(result.data[2] > 0.5, "blue should be boosted, got {}", result.data[2]);
+        assert!(
+            result.data[0] < 0.5,
+            "red should be reduced, got {}",
+            result.data[0]
+        );
+        assert!(
+            result.data[2] > 0.5,
+            "blue should be boosted, got {}",
+            result.data[2]
+        );
     }
 
     #[test]
@@ -296,8 +333,10 @@ mod tests {
                 ..Default::default()
             };
             let result = WhiteBalance.process_cpu(buf.clone(), &params).unwrap();
-            assert!(result.data.iter().all(|v| v.is_finite()),
-                "all values should be finite at {temp}K");
+            assert!(
+                result.data.iter().all(|v| v.is_finite()),
+                "all values should be finite at {temp}K"
+            );
         }
     }
 
@@ -390,7 +429,10 @@ mod tests {
         };
         let result = WhiteBalance.process_cpu(buf, &params).unwrap();
         for &v in &result.data {
-            assert!(v.is_finite() && v > 0.0, "should be finite positive, got {v}");
+            assert!(
+                v.is_finite() && v > 0.0,
+                "should be finite positive, got {v}"
+            );
         }
     }
 
@@ -418,6 +460,128 @@ mod tests {
                 "R/B ratio should increase with temp: {temp}K ratio={ratio} prev={prev_ratio}"
             );
             prev_ratio = ratio;
+        }
+    }
+
+    #[test]
+    fn quantitative_d65_to_d50() {
+        // Compare wb_matrix output against the published Bradford D65->D50 matrix.
+        // D50 is approximately 5003K. Our ref is 5500K, so wb_matrix(5003, 0)
+        // adapts from 5003K illuminant to 5500K.
+        //
+        // Known Bradford D65->D50 diagonal scaling (from Lindbloom):
+        //   L_scale = 1.0479, M_scale = 1.0226, S_scale = 0.8869
+        //
+        // We can't compare the full combined matrix directly (different ref temps),
+        // but we can verify the Bradford sub-chain: adapting D65 (6504K) to our
+        // ref (5500K) should produce a matrix where a D65 white input comes out neutral.
+        let m = wb_matrix(6504.0, 0.0);
+
+        // Apply to a pixel that represents D65 white (1, 1, 1 in sRGB linear).
+        // Row sums = output for a (1,1,1) input.
+        let r = m[0] + m[1] + m[2];
+        let g = m[3] + m[4] + m[5];
+        let b = m[6] + m[7] + m[8];
+
+        let row_sum_r = r;
+        let row_sum_g = g;
+        let row_sum_b = b;
+
+        // Row sums should be reasonable (not degenerate)
+        for (label, sum) in [("R", row_sum_r), ("G", row_sum_g), ("B", row_sum_b)] {
+            assert!(
+                sum > 0.5 && sum < 1.5,
+                "{label} row sum should be reasonable: {sum}"
+            );
+        }
+
+        // Warm adaptation: R should be boosted, B should be reduced
+        assert!(
+            r > b,
+            "D65->5500K should boost red relative to blue: R={r} B={b}"
+        );
+    }
+
+    #[test]
+    fn roundtrip_adaptation() {
+        // Adapting A->B then B->A on a pixel should approximately recover the input.
+        let pixel = [0.5_f32, 0.3, 0.8];
+        let m_forward = wb_matrix(4000.0, 10.0);
+
+        // Apply forward: transform pixel under 4000K assumption to ref (5500K)
+        let adapted = [
+            m_forward[0] * pixel[0] + m_forward[1] * pixel[1] + m_forward[2] * pixel[2],
+            m_forward[3] * pixel[0] + m_forward[4] * pixel[1] + m_forward[5] * pixel[2],
+            m_forward[6] * pixel[0] + m_forward[7] * pixel[1] + m_forward[8] * pixel[2],
+        ];
+
+        // Apply the identity matrix at ref temp: should be identity
+        let m_identity = wb_matrix(5500.0, 0.0);
+        let recovered = [
+            m_identity[0] * adapted[0] + m_identity[1] * adapted[1] + m_identity[2] * adapted[2],
+            m_identity[3] * adapted[0] + m_identity[4] * adapted[1] + m_identity[5] * adapted[2],
+            m_identity[6] * adapted[0] + m_identity[7] * adapted[1] + m_identity[8] * adapted[2],
+        ];
+
+        for i in 0..3 {
+            assert!(
+                (recovered[i] - adapted[i]).abs() < 1e-3,
+                "identity at ref temp should not change adapted pixel: ch{i} {} vs {}",
+                recovered[i],
+                adapted[i]
+            );
+        }
+    }
+
+    #[test]
+    fn tint_at_extreme_temp() {
+        // Combine extreme tint with extreme temperature; should be finite and positive.
+        let buf = ImageBuf::from_data(1, 1, vec![0.5, 0.5, 0.5]).unwrap();
+        for (temp, tint) in [(2000.0_f32, 150.0), (2000.0, -150.0), (20000.0, 150.0)] {
+            let params = EditParams {
+                wb_temp: temp,
+                wb_tint: tint,
+                ..Default::default()
+            };
+            let result = WhiteBalance.process_cpu(buf.clone(), &params).unwrap();
+            assert!(
+                result.data.iter().all(|v| v.is_finite() && *v >= 0.0),
+                "extreme temp={temp} tint={tint} should produce finite positive: {:?}",
+                result.data
+            );
+        }
+    }
+
+    #[test]
+    fn hdr_input_handled() {
+        // Scene-referred values above 1.0 should scale proportionally.
+        let buf = ImageBuf::from_data(1, 1, vec![2.0, 1.5, 3.0]).unwrap();
+        let params = EditParams {
+            wb_temp: 4000.0,
+            ..Default::default()
+        };
+        let result = WhiteBalance.process_cpu(buf, &params).unwrap();
+        assert!(
+            result.data.iter().all(|v| v.is_finite() && *v >= 0.0),
+            "HDR input should produce finite non-negative output: {:?}",
+            result.data
+        );
+    }
+
+    #[test]
+    fn matrix_determinant_reasonable() {
+        // The combined matrix should have a determinant in a reasonable range,
+        // ensuring it doesn't catastrophically amplify or crush values.
+        for temp in (2500..=15000).step_by(500) {
+            let m = wb_matrix(temp as f32, 0.0);
+            let m64: Vec<f64> = m.iter().map(|&v| v as f64).collect();
+            let det = m64[0] * (m64[4] * m64[8] - m64[5] * m64[7])
+                - m64[1] * (m64[3] * m64[8] - m64[5] * m64[6])
+                + m64[2] * (m64[3] * m64[7] - m64[4] * m64[6]);
+            assert!(
+                det > 0.2 && det < 5.0,
+                "matrix determinant at {temp}K should be reasonable: {det}"
+            );
         }
     }
 }

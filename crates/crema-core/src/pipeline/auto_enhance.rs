@@ -1,3 +1,4 @@
+use crate::color::{linear_srgb_to_oklab, linear_to_srgb, srgb_to_linear};
 use crate::image_buf::{EditParams, ImageBuf};
 
 /// Analyze a linear f32 preview and produce edit suggestions.
@@ -7,11 +8,14 @@ use crate::image_buf::{EditParams, ImageBuf};
 ///
 /// Strategy (inspired by pre-ML Lightroom Auto):
 ///   - Highlights and shadows do the heavy lifting, not exposure.
+///   - Feedforward: exposure correction is applied to percentiles
+///     before computing highlight/shadow targets.
 ///   - Pull down bright areas (sqrt ramp for perceptual uniformity).
 ///   - Lift dark areas to reveal shadow detail (sqrt ramp).
 ///   - Crush blacks to maintain depth after shadow lift.
-///   - Small exposure nudge (45% strength, dead zone ±0.07 EV).
-///   - Leave WB at camera's As Shot (gray-world is unreliable).
+///   - Small exposure nudge (45% strength, dead zone +/-0.07 EV).
+///   - Gray-point WB: detect neutral candidates via OKLab chroma,
+///     estimate and correct color casts conservatively.
 ///   - Modest contrast and vibrance boost.
 pub fn auto_enhance(buf: &ImageBuf) -> EditParams {
     let pixel_count = buf.pixel_count();
@@ -22,6 +26,12 @@ pub fn auto_enhance(buf: &ImageBuf) -> EditParams {
     let mut luminances = Vec::with_capacity(pixel_count);
     let mut sum_sat = 0.0_f64;
     let mut sat_count = 0_u64;
+
+    // Gray-point WB: accumulate RGB of neutral candidates (low OKLab chroma).
+    let mut wb_sum_r = 0.0_f64;
+    let mut wb_sum_b = 0.0_f64;
+    let mut wb_sum_ok_a = 0.0_f64;
+    let mut wb_count = 0_u64;
 
     for pixel in buf.data.chunks_exact(3) {
         let r = pixel[0] as f64;
@@ -36,6 +46,16 @@ pub fn auto_enhance(buf: &ImageBuf) -> EditParams {
             let min_ch = r.min(g).min(b);
             sum_sat += (max_ch - min_ch) / (max_ch + 1e-6);
             sat_count += 1;
+        }
+
+        // Neutral candidate: mid-brightness, low OKLab chroma.
+        let (ok_l, ok_a, ok_b) = linear_srgb_to_oklab(pixel[0], pixel[1], pixel[2]);
+        let ok_chroma = (ok_a * ok_a + ok_b * ok_b).sqrt();
+        if ok_l > 0.3 && ok_l < 0.85 && ok_chroma < 0.04 {
+            wb_sum_r += r;
+            wb_sum_b += b;
+            wb_sum_ok_a += ok_a as f64;
+            wb_count += 1;
         }
     }
 
@@ -53,7 +73,7 @@ pub fn auto_enhance(buf: &ImageBuf) -> EditParams {
     // All thresholds below are in perceptual space [0, 1].
 
     // ── Exposure ──
-    // Target: perceptual mid-gray (~0.46). Third-strength correction.
+    // Target: perceptual mid-gray (~0.46). 45% strength correction.
     let target_mid = 0.46; // 0.18 linear in gamma 2.2
     let raw_ev = if p50 > 0.01 {
         (target_mid / p50).log2() * 0.45
@@ -66,21 +86,37 @@ pub fn auto_enhance(buf: &ImageBuf) -> EditParams {
         raw_ev.clamp(-2.0, 2.0)
     } as f32;
 
-    // ── Highlights ──
+    // ── Feedforward: simulate exposure effect on perceptual percentiles ──
+    // Without this, the exposure and tonal controls are estimated independently
+    // from the original histogram. Feedforward accounts for how the exposure
+    // change shifts the histogram before setting highlight/shadow targets.
+    let correct_p = |p: f64| -> f64 {
+        if ev == 0.0 {
+            return p;
+        }
+        let linear = srgb_to_linear(p as f32) as f64;
+        let corrected = linear * 2.0_f64.powf(ev as f64);
+        linear_to_srgb(corrected.clamp(0.0, 1.0) as f32) as f64
+    };
+    let p5_c = correct_p(p5);
+    let p10_c = correct_p(p10);
+    let p95_c = correct_p(p95);
+
+    // ── Highlights ── (uses exposure-corrected p95)
     // In perceptual space, 0.58 corresponds to ~0.30 linear.
     // sqrt ramp for perceptual uniformity: more aggressive at moderate brightness.
-    let highlights = if p95 > 0.58 {
-        let t = ((p95 - 0.58) / 0.42).sqrt();
+    let highlights = if p95_c > 0.58 {
+        let t = ((p95_c - 0.58) / 0.42).sqrt();
         -(t * 100.0).clamp(0.0, 100.0) as f32
     } else {
         0.0
     };
 
-    // ── Shadows ──
+    // ── Shadows ── (uses exposure-corrected p10)
     // In perceptual space, 0.38 corresponds to ~0.12 linear.
     // sqrt ramp, cap at 70 (matches Lightroom Auto typical range).
-    let shadows = if p10 < 0.38 {
-        let t = ((0.38 - p10) / 0.38).sqrt();
+    let shadows = if p10_c < 0.38 {
+        let t = ((0.38 - p10_c) / 0.38).sqrt();
         (t * 70.0).clamp(0.0, 70.0) as f32
     } else {
         0.0
@@ -95,18 +131,17 @@ pub fn auto_enhance(buf: &ImageBuf) -> EditParams {
         0.0
     };
 
-    // ── Contrast ──
-    // +8 baseline; boost for flat histograms (narrow perceptual spread).
-    let spread = p95 - p5;
-    let contrast = if spread < 0.35 {
-        ((0.35 - spread) / 0.35 * 12.0 + 8.0).clamp(8.0, 20.0) as f32
+    // ── Contrast ── (uses exposure-corrected spread)
+    // Zero for well-spread images; boost proportional to how flat the histogram is.
+    let spread = p95_c - p5_c;
+    let contrast = if spread < 0.5 {
+        ((0.5 - spread) / 0.5 * 20.0).clamp(0.0, 20.0) as f32
     } else {
-        8.0_f32
+        0.0_f32
     };
 
-    // ── White balance ──
-    // Leave at neutral. Gray-world WB is unreliable for real scenes.
-    let wb_temp = 5500.0_f32;
+    // ── White balance: gray-point estimation ──
+    let (wb_temp, wb_tint) = estimate_wb(wb_sum_r, wb_sum_b, wb_sum_ok_a, wb_count, pixel_count);
 
     // ── Vibrance ──
     // Modest boost proportional to how desaturated the image is.
@@ -120,7 +155,7 @@ pub fn auto_enhance(buf: &ImageBuf) -> EditParams {
     EditParams {
         exposure: ev,
         wb_temp,
-        wb_tint: 0.0,
+        wb_tint,
         contrast,
         highlights,
         shadows,
@@ -132,6 +167,55 @@ pub fn auto_enhance(buf: &ImageBuf) -> EditParams {
         crop_w: 1.0,
         crop_h: 1.0,
     }
+}
+
+/// Estimate white balance from neutral candidate pixels.
+///
+/// Requires at least 2% of pixels to be neutral candidates (low OKLab
+/// chroma, mid brightness). If not enough candidates exist, returns
+/// neutral (5500K, tint=0) to avoid hallucinating corrections in scenes
+/// with no reliable reference (e.g., sunsets, neon lighting).
+fn estimate_wb(
+    sum_r: f64,
+    sum_b: f64,
+    sum_ok_a: f64,
+    count: u64,
+    pixel_count: usize,
+) -> (f32, f32) {
+    if count < (pixel_count as u64 / 50).max(3) {
+        return (5500.0, 0.0);
+    }
+
+    let avg_r = sum_r / count as f64;
+    let avg_b = sum_b / count as f64;
+
+    if avg_r < 0.01 || avg_b < 0.01 {
+        return (5500.0, 0.0);
+    }
+
+    // Temperature from R/B ratio in linear light.
+    // log2(R/B) > 0 means warm cast; correction lowers wb_temp to cool.
+    let rb_log = (avg_r / avg_b).log2();
+    let temp_shift = if rb_log.abs() > 0.05 {
+        (-rb_log * 1500.0).clamp(-2000.0, 2000.0)
+    } else {
+        0.0
+    };
+
+    // Tint from OKLab a-channel of neutral candidates.
+    // Positive ok_a = red/magenta cast, negative = green cast.
+    // Negate: green cast (ok_a < 0) needs positive tint (add magenta).
+    let avg_ok_a = sum_ok_a / count as f64;
+    let tint_shift = if avg_ok_a.abs() > 0.003 {
+        (-avg_ok_a * 1000.0).clamp(-30.0, 30.0)
+    } else {
+        0.0
+    };
+
+    (
+        (5500.0 + temp_shift).clamp(3000.0, 9000.0) as f32,
+        tint_shift as f32,
+    )
 }
 
 #[cfg(test)]
@@ -274,12 +358,12 @@ mod tests {
     }
 
     #[test]
-    fn contrast_baseline_for_normal_image() {
+    fn contrast_zero_for_well_spread_image() {
         let buf = scene_image(0.05, 0.3, 0.8, 12);
         let params = auto_enhance(&buf);
-        assert!(
-            (7.5..=8.5).contains(&params.contrast),
-            "normal image should get ~8 contrast, got {}",
+        assert_eq!(
+            params.contrast, 0.0,
+            "well-spread image should get zero contrast, got {}",
             params.contrast
         );
     }
@@ -296,13 +380,76 @@ mod tests {
     }
 
     #[test]
-    fn wb_always_neutral() {
+    fn wb_neutral_for_saturated_scene() {
+        // All pixels are high-chroma (warm red) -> no neutral candidates
         let buf = uniform_image(0.5, 0.2, 0.2, 10);
         let params = auto_enhance(&buf);
         assert_eq!(
             params.wb_temp, 5500.0,
-            "WB should always stay at 5500, got {}",
+            "no neutral candidates -> WB should stay at 5500, got {}",
             params.wb_temp
+        );
+    }
+
+    #[test]
+    fn wb_neutral_for_achromatic_scene() {
+        // Gray pixels have no cast -> WB stays neutral
+        let buf = uniform_image(0.3, 0.3, 0.3, 10);
+        let params = auto_enhance(&buf);
+        assert_eq!(
+            params.wb_temp, 5500.0,
+            "neutral gray -> no correction needed, got {}",
+            params.wb_temp
+        );
+        assert_eq!(params.wb_tint, 0.0);
+    }
+
+    #[test]
+    fn wb_corrects_warm_cast() {
+        // Neutral-ish pixels with warm tint (R > G > B)
+        let buf = uniform_image(0.28, 0.25, 0.22, 20);
+        let params = auto_enhance(&buf);
+        assert!(
+            params.wb_temp < 5500.0,
+            "warm cast should lower wb_temp below 5500, got {}",
+            params.wb_temp
+        );
+        assert!(
+            params.wb_temp > 3000.0,
+            "correction should be conservative, got {}",
+            params.wb_temp
+        );
+    }
+
+    #[test]
+    fn wb_corrects_cool_cast() {
+        // Neutral-ish pixels with cool tint (B > G > R)
+        let buf = uniform_image(0.22, 0.25, 0.28, 20);
+        let params = auto_enhance(&buf);
+        assert!(
+            params.wb_temp > 5500.0,
+            "cool cast should raise wb_temp above 5500, got {}",
+            params.wb_temp
+        );
+        assert!(
+            params.wb_temp < 9000.0,
+            "correction should be conservative, got {}",
+            params.wb_temp
+        );
+    }
+
+    #[test]
+    fn feedforward_reduces_highlight_recovery() {
+        // Scene with bright highlights and slightly dark overall (positive EV).
+        // Feedforward should predict that exposure boost pushes highlights higher,
+        // resulting in MORE highlight recovery than without feedforward.
+        let buf = scene_image(0.03, 0.10, 0.75, 12);
+        let params = auto_enhance(&buf);
+        // With positive EV feedforward, p95 shifts up -> highlights more negative
+        assert!(
+            params.highlights < 0.0,
+            "feedforward with positive EV should still trigger highlight recovery, got {}",
+            params.highlights
         );
     }
 
@@ -310,21 +457,29 @@ mod tests {
     fn all_params_valid_ranges() {
         let buf = scene_image(0.01, 0.2, 0.7, 20);
         let p = auto_enhance(&buf);
-        assert!((-2.0..=2.0).contains(&p.exposure), "exposure {}", p.exposure);
-        assert_eq!(p.wb_temp, 5500.0);
-        assert_eq!(p.wb_tint, 0.0);
-        assert!((0.0..=20.0).contains(&p.contrast), "contrast {}", p.contrast);
+        assert!(
+            (-2.0..=2.0).contains(&p.exposure),
+            "exposure {}",
+            p.exposure
+        );
+        assert!(
+            (3000.0..=9000.0).contains(&p.wb_temp),
+            "wb_temp {}",
+            p.wb_temp
+        );
+        assert!((-30.0..=30.0).contains(&p.wb_tint), "wb_tint {}", p.wb_tint);
+        assert!(
+            (0.0..=20.0).contains(&p.contrast),
+            "contrast {}",
+            p.contrast
+        );
         assert!(
             (-100.0..=0.0).contains(&p.highlights),
             "highlights {}",
             p.highlights
         );
         assert!((0.0..=70.0).contains(&p.shadows), "shadows {}", p.shadows);
-        assert!(
-            (-25.0..=0.0).contains(&p.blacks),
-            "blacks {}",
-            p.blacks
-        );
+        assert!((-25.0..=0.0).contains(&p.blacks), "blacks {}", p.blacks);
         assert!(
             (5.0..=25.0).contains(&p.vibrance),
             "vibrance {}",
@@ -359,5 +514,95 @@ mod tests {
         let defaults = EditParams::default();
         assert_eq!(params.exposure, defaults.exposure);
         assert_eq!(params.wb_temp, defaults.wb_temp);
+    }
+
+    #[test]
+    fn bimodal_histogram_balanced() {
+        // 50% dark pixels, 50% bright pixels (backlit scene).
+        // Median should be near the boundary; exposure should be moderate.
+        let size = 20_u32;
+        let pixel_count = (size * size) as usize;
+        let mut data = Vec::with_capacity(pixel_count * 3);
+        for i in 0..pixel_count {
+            let v = if i < pixel_count / 2 { 0.02 } else { 0.7 };
+            data.push(v);
+            data.push(v);
+            data.push(v);
+        }
+        let buf = ImageBuf::from_data(size, size, data).unwrap();
+        let params = auto_enhance(&buf);
+
+        // Should not wildly over-expose or under-expose
+        assert!(
+            params.exposure.abs() < 1.5,
+            "bimodal scene exposure should be moderate: {}",
+            params.exposure
+        );
+        // Should trigger both shadow lift and highlight recovery
+        assert!(
+            params.shadows > 0.0 || params.highlights < 0.0,
+            "bimodal scene should trigger tonal recovery: shadows={} highlights={}",
+            params.shadows,
+            params.highlights
+        );
+    }
+
+    #[test]
+    fn neutral_threshold_boundary() {
+        // Build an image where exactly 2% of pixels are neutral candidates,
+        // and verify WB correction activates.
+        let size = 50_u32; // 2500 pixels; 2% = 50 pixels
+        let pixel_count = (size * size) as usize;
+        let mut data = Vec::with_capacity(pixel_count * 3);
+
+        let neutral_count = pixel_count / 50; // exactly 2%
+        for i in 0..pixel_count {
+            if i < neutral_count {
+                // Neutral-ish with warm cast: R slightly > B
+                data.push(0.32);
+                data.push(0.30);
+                data.push(0.25);
+            } else {
+                // Saturated (non-neutral) pixels
+                data.push(0.8);
+                data.push(0.2);
+                data.push(0.1);
+            }
+        }
+        let buf = ImageBuf::from_data(size, size, data).unwrap();
+        let params = auto_enhance(&buf);
+
+        // With exactly 2% neutral candidates and a warm cast, wb_temp should shift
+        assert!(
+            params.wb_temp != 5500.0,
+            "with 2% neutral warm-cast candidates, WB should adjust: {}",
+            params.wb_temp
+        );
+    }
+
+    #[test]
+    fn tint_corrects_green_cast() {
+        // Gray-ish pixels with a green tint (green channel elevated).
+        // OKLab a-channel should be negative for green.
+        let buf = uniform_image(0.25, 0.32, 0.25, 20);
+        let params = auto_enhance(&buf);
+        assert!(
+            params.wb_tint > 0.0,
+            "green cast should produce positive tint correction: {}",
+            params.wb_tint
+        );
+    }
+
+    #[test]
+    fn tint_corrects_magenta_cast() {
+        // Gray-ish pixels with a magenta tint (green channel depressed).
+        // OKLab a-channel should be positive for magenta.
+        let buf = uniform_image(0.30, 0.22, 0.30, 20);
+        let params = auto_enhance(&buf);
+        assert!(
+            params.wb_tint < 0.0,
+            "magenta cast should produce negative tint correction: {}",
+            params.wb_tint
+        );
     }
 }

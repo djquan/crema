@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use crate::color::{OKLAB_MAX_CHROMA, linear_srgb_to_oklab, linear_to_srgb};
 use crate::image_buf::{EditParams, ImageBuf};
 use crate::pipeline::module::ProcessingModule;
 
@@ -19,17 +20,20 @@ impl ProcessingModule for Vibrance {
         let sign = strength.signum();
         for pixel in input.data.chunks_exact_mut(3) {
             let y = 0.2126 * pixel[0] + 0.7152 * pixel[1] + 0.0722 * pixel[2];
-            let max_ch = pixel[0].max(pixel[1]).max(pixel[2]);
-            let min_ch = pixel[0].min(pixel[1]).min(pixel[2]);
-            let sat = (max_ch - min_ch) / (max_ch + 1e-6);
+
+            // OKLab chroma: perceptually uniform saturation metric.
+            let (_, ok_a, ok_b) = linear_srgb_to_oklab(pixel[0], pixel[1], pixel[2]);
+            let chroma = (ok_a * ok_a + ok_b * ok_b).sqrt();
+            let sat = (chroma / OKLAB_MAX_CHROMA).clamp(0.0, 1.0);
 
             // Selective saturation (SweetFX/ReShade convention):
             //   positive -> targets low-sat pixels (1 - sat)
             //   negative -> targets high-sat pixels (1 + sat)
-            let mut effect = strength * (1.0 - sign * sat);
+            let mut effect = (strength * (1.0 - sign * sat)).max(-1.0);
 
             // Skin tone protection: reduce effect for warm hues to prevent
             // portraits from looking sunburned (boost) or sickly (cut).
+            let max_ch = pixel[0].max(pixel[1]).max(pixel[2]);
             if max_ch > 1e-6 {
                 let skin_factor = skin_tone_weight(pixel[0], pixel[1], pixel[2]);
                 effect *= 1.0 - skin_factor * 0.7;
@@ -50,9 +54,9 @@ impl ProcessingModule for Vibrance {
 /// degrees (red through warm yellow); the range wraps around 360/0 to
 /// catch very red skin tones at hue ~355-360.
 fn skin_tone_weight(r: f32, g: f32, b: f32) -> f32 {
-    let rg = r.max(0.0).powf(1.0 / 2.2);
-    let gg = g.max(0.0).powf(1.0 / 2.2);
-    let bg = b.max(0.0).powf(1.0 / 2.2);
+    let rg = linear_to_srgb(r.max(0.0));
+    let gg = linear_to_srgb(g.max(0.0));
+    let bg = linear_to_srgb(b.max(0.0));
 
     let max_ch = rg.max(gg).max(bg);
     let min_ch = rg.min(gg).min(bg);
@@ -70,14 +74,15 @@ fn skin_tone_weight(r: f32, g: f32, b: f32) -> f32 {
     };
     let hue = if hue < 0.0 { hue + 360.0 } else { hue };
 
-    // Skin tone range: 350-70 degrees (wraps around 0/360).
-    // Ramp in: 350-5, plateau: 5-55, ramp out: 55-70.
-    if hue >= 350.0 || hue <= 70.0 {
+    // Skin tone range: 350-85 degrees (wraps around 0/360).
+    // Ramp in: 350-5, plateau: 5-55, ramp out: 55-85.
+    // Extended to 85 to cover olive/warm-yellow skin tones.
+    if hue >= 350.0 || hue <= 85.0 {
         let h = if hue >= 350.0 { hue - 360.0 } else { hue };
         if h < 5.0 {
             ((h + 10.0) / 15.0).clamp(0.0, 1.0)
         } else if h > 55.0 {
-            ((70.0 - h) / 15.0).clamp(0.0, 1.0)
+            ((85.0 - h) / 30.0).clamp(0.0, 1.0)
         } else {
             1.0
         }
@@ -101,8 +106,9 @@ mod tests {
 
     #[test]
     fn positive_boosts_desaturated_more() {
-        let saturated = ImageBuf::from_data(1, 1, vec![0.8, 0.0, 0.0]).unwrap();
-        let desaturated = ImageBuf::from_data(1, 1, vec![0.5, 0.45, 0.4]).unwrap();
+        // Use blue-ish pixels to avoid skin tone protection interference.
+        let saturated = ImageBuf::from_data(1, 1, vec![0.2, 0.2, 0.8]).unwrap();
+        let desaturated = ImageBuf::from_data(1, 1, vec![0.45, 0.45, 0.55]).unwrap();
 
         let params = EditParams {
             vibrance: 50.0,
@@ -112,15 +118,21 @@ mod tests {
         let sat_result = Vibrance.process_cpu(saturated, &params).unwrap();
         let desat_result = Vibrance.process_cpu(desaturated, &params).unwrap();
 
-        let sat_y = 0.2126 * 0.8;
-        let sat_delta = (sat_result.data[0] - sat_y).abs() - (0.8 - sat_y).abs();
+        // Compare relative boost: (new_deviation / old_deviation).
+        // Vibrance selectivity means desaturated gets a higher percentage boost.
+        let sat_y = 0.2126 * 0.2 + 0.7152 * 0.2 + 0.0722 * 0.8;
+        let sat_old_dev = (0.8_f32 - sat_y).abs();
+        let sat_new_dev = (sat_result.data[2] - sat_y).abs();
+        let sat_relative = sat_new_dev / sat_old_dev;
 
-        let desat_y = 0.2126 * 0.5 + 0.7152 * 0.45 + 0.0722 * 0.4;
-        let desat_delta = (desat_result.data[0] - desat_y).abs() - (0.5 - desat_y).abs();
+        let desat_y = 0.2126 * 0.45 + 0.7152 * 0.45 + 0.0722 * 0.55;
+        let desat_old_dev = (0.55_f32 - desat_y).abs();
+        let desat_new_dev = (desat_result.data[2] - desat_y).abs();
+        let desat_relative = desat_new_dev / desat_old_dev;
 
         assert!(
-            desat_delta > sat_delta,
-            "desaturated pixel should be boosted more: desat_delta={desat_delta} sat_delta={sat_delta}"
+            desat_relative > sat_relative,
+            "desaturated pixel should get higher relative boost: desat={desat_relative} sat={sat_relative}"
         );
     }
 
@@ -265,5 +277,81 @@ mod tests {
         assert!(skin_tone_weight(0.0, 1.0, 0.0) < 0.01);
         // Very red skin (hue ~0 degrees): protected via wrap-around
         assert!(skin_tone_weight(1.0, 0.3, 0.3) > 0.5);
+    }
+
+    #[test]
+    fn skin_tone_weight_boundary_hues() {
+        // Ramp-in start: hue ~350 degrees (very red), should be partial
+        let w350 = skin_tone_weight(0.8, 0.2, 0.25);
+        assert!(
+            w350 > 0.0 && w350 < 1.0,
+            "hue ~350 should be in ramp-in: {w350}"
+        );
+
+        // Plateau: hue ~30 degrees (classic skin tone), fully protected
+        let w30 = skin_tone_weight(0.8, 0.5, 0.2);
+        assert!(w30 > 0.8, "hue ~30 should be in plateau: {w30}");
+
+        // Ramp-out: hue ~70 degrees (warm yellow), partial protection
+        let w70 = skin_tone_weight(0.7, 0.7, 0.1);
+        assert!(
+            w70 > 0.0,
+            "hue ~70 should still have some protection: {w70}"
+        );
+
+        // Extended range: hue ~80 degrees (olive skin), partial protection
+        let w80 = skin_tone_weight(0.5, 0.6, 0.1);
+        assert!(
+            w80 > 0.0,
+            "hue ~80 (olive skin) should have partial protection: {w80}"
+        );
+
+        // Just outside: hue ~90 degrees (yellow-green), no protection
+        let w90 = skin_tone_weight(0.3, 0.6, 0.1);
+        assert!(w90 < 0.01, "hue ~90 should have no protection: {w90}");
+    }
+
+    #[test]
+    fn no_color_inversion_at_extreme_negative() {
+        // Saturated blue pixel at vibrance=-100: should desaturate toward gray, not invert.
+        let buf = ImageBuf::from_data(1, 1, vec![0.1, 0.1, 0.9]).unwrap();
+        let params = EditParams {
+            vibrance: -100.0,
+            ..Default::default()
+        };
+        let result = Vibrance.process_cpu(buf, &params).unwrap();
+
+        // Blue channel should still be >= other channels (no inversion)
+        assert!(
+            result.data[2] >= result.data[0] - 1e-6,
+            "blue should still be >= red after extreme negative vibrance: B={} R={}",
+            result.data[2],
+            result.data[0]
+        );
+
+        // The blend factor (1 + effect) should never be negative
+        let y = 0.2126 * 0.1 + 0.7152 * 0.1 + 0.0722 * 0.9;
+        for &v in &result.data {
+            assert!(
+                (v - y).abs() <= (0.9 - y) + 1e-4,
+                "output should be between input and gray, got {v} (y={y})"
+            );
+        }
+    }
+
+    #[test]
+    fn hdr_input_handled() {
+        // Scene-referred HDR values above 1.0
+        let buf = ImageBuf::from_data(1, 1, vec![2.0, 1.5, 0.5]).unwrap();
+        let params = EditParams {
+            vibrance: 50.0,
+            ..Default::default()
+        };
+        let result = Vibrance.process_cpu(buf, &params).unwrap();
+        assert!(
+            result.data.iter().all(|v| v.is_finite() && *v >= 0.0),
+            "HDR input should produce finite non-negative output: {:?}",
+            result.data
+        );
     }
 }

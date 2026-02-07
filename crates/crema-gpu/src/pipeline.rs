@@ -2,6 +2,7 @@ use anyhow::Result;
 use tracing::debug;
 
 use crema_core::image_buf::EditParams;
+use crema_core::pipeline::modules::wb_matrix;
 
 use crate::context::GpuContext;
 use crate::shader::ShaderManager;
@@ -180,21 +181,22 @@ impl GpuPipeline {
 
         let output = GpuTexture::create_storage(&ctx.device, input.width, input.height, "wb_out");
 
-        let temp_shift = (params.wb_temp - 5500.0) / 5500.0;
-        let r_mult = (1.0 + temp_shift * 0.3_f32).max(0.1);
-        let g_mult = (1.0 + params.wb_tint * 0.01_f32).max(0.1);
-        let b_mult = (1.0 - temp_shift * 0.3_f32).max(0.1);
+        // Use the same Bradford CAT matrix as the CPU pipeline.
+        let matrix = wb_matrix(params.wb_temp, params.wb_tint);
 
         let params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("wb_params"),
-            size: 16,
+            size: 48, // 3 x vec4<f32>
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         ctx.queue.write_buffer(
             &params_buf,
             0,
-            bytemuck::cast_slice(&[r_mult, g_mult, b_mult, 0.0_f32]),
+            bytemuck::cast_slice(&[
+                matrix[0], matrix[1], matrix[2], 0.0_f32, matrix[3], matrix[4], matrix[5], 0.0_f32,
+                matrix[6], matrix[7], matrix[8], 0.0_f32,
+            ]),
         );
 
         let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {

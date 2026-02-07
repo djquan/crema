@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use crate::color::{linear_to_srgb, srgb_to_linear};
 use crate::image_buf::{EditParams, ImageBuf};
 use crate::pipeline::module::ProcessingModule;
 
@@ -23,15 +24,26 @@ impl ProcessingModule for ToneCurve {
 
         let lut = build_tone_lut(params);
 
+        // Pre-compute HDR extension: continue the LUT's slope beyond 1.0
+        // so super-white pixels aren't all mapped through the same scale factor.
+        let lut_top = lut[LUT_SIZE - 1];
+        let lut_slope = (lut[LUT_SIZE - 1] - lut[LUT_SIZE - 2]) * (LUT_SIZE - 1) as f32;
+
         for pixel in input.data.chunks_exact_mut(3) {
             let y = 0.2126 * pixel[0] + 0.7152 * pixel[1] + 0.0722 * pixel[2];
             if y < 1e-6 {
                 continue;
             }
 
-            let y_in = y.clamp(0.0, 1.0);
-            let new_y = lut_lerp(&lut, y_in);
-            let scale = new_y / y_in;
+            let scale = if y <= 1.0 {
+                lut_lerp(&lut, y) / y
+            } else {
+                // Extend the LUT linearly, matching its slope at the top.
+                // Preserves relative brightness among HDR pixels and gives
+                // C1 continuity at y=1.0.
+                let new_y = lut_top + lut_slope * (y - 1.0);
+                (new_y / y).max(0.0)
+            };
 
             pixel[0] = (pixel[0] * scale).max(0.0);
             pixel[1] = (pixel[1] * scale).max(0.0);
@@ -63,6 +75,7 @@ const SHADOW_LO: f32 = 0.10;
 const SHADOW_HI: f32 = 0.35;
 const HIGHLIGHT_LO: f32 = 0.65;
 const HIGHLIGHT_HI: f32 = 0.90;
+const BLACKS_HI: f32 = 0.15;
 const FEATHER: f32 = 0.05;
 
 fn build_tone_lut(params: &EditParams) -> [f32; LUT_SIZE] {
@@ -83,7 +96,7 @@ fn build_tone_lut(params: &EditParams) -> [f32; LUT_SIZE] {
 
     for (i, entry) in lut.iter_mut().enumerate() {
         let linear_in = i as f32 / (LUT_SIZE - 1) as f32;
-        let t = linear_in.powf(1.0 / 2.2);
+        let t = linear_to_srgb(linear_in);
 
         let mut out = t;
 
@@ -128,12 +141,26 @@ fn build_tone_lut(params: &EditParams) -> [f32; LUT_SIZE] {
             out = s_curve(out, a);
         }
 
-        // Blacks: additive near-black adjustment with smooth rolloff
-        if blacks != 0.0 {
-            out += blacks * smoothstep_down(out, 0.0, 0.15) * 0.30;
+        // Blacks: power curve in [0, BLACKS_HI] with optional black-point lift.
+        // Positive: lift = proportional offset raising the black point + gamma < 1.
+        // Negative: gamma > 1 crushes dark tones toward zero.
+        // Inherently monotonic (no post-hoc fix needed for this stage).
+        if blacks != 0.0 && out < BLACKS_HI + FEATHER {
+            let gamma = 3.0_f32.powf(-blacks);
+            let lift = blacks.max(0.0) * 0.10;
+            let range = BLACKS_HI - lift;
+            let n = (out / BLACKS_HI).clamp(0.0, 1.0);
+            let blacks_val = lift + n.powf(gamma) * range;
+
+            if out >= BLACKS_HI {
+                let blend = smoothstep((out - BLACKS_HI) / FEATHER);
+                out = blacks_val * (1.0 - blend) + out * blend;
+            } else {
+                out = blacks_val;
+            }
         }
 
-        *entry = out.clamp(0.0, 1.0).powf(2.2);
+        *entry = srgb_to_linear(out.clamp(0.0, 1.0));
     }
 
     // Enforce monotonicity (safety net for extreme combined settings)
@@ -167,12 +194,6 @@ fn s_curve(x: f32, a: f32) -> f32 {
 fn smoothstep(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
-}
-
-/// Smooth ramp from 1.0 at `lo` to 0.0 at `hi`.
-fn smoothstep_down(x: f32, lo: f32, hi: f32) -> f32 {
-    let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
-    1.0 - t * t * (3.0 - 2.0 * t)
 }
 
 fn lut_lerp(lut: &[f32; LUT_SIZE], y: f32) -> f32 {
@@ -209,9 +230,7 @@ mod tests {
     fn identity_noop() {
         let buf = uniform(0.5, 0.5, 0.5, 4, 4);
         let expected = buf.data.clone();
-        let result = ToneCurve
-            .process_cpu(buf, &EditParams::default())
-            .unwrap();
+        let result = ToneCurve.process_cpu(buf, &EditParams::default()).unwrap();
         assert_eq!(result.data, expected);
     }
 
@@ -517,6 +536,160 @@ mod tests {
         assert!(
             delta < 0.01,
             "highlights should not affect mid-gray (0.18 linear), delta={delta}"
+        );
+    }
+
+    #[test]
+    fn combined_controls_monotonic() {
+        // Property test: random-ish combined settings should always produce a monotonic LUT.
+        let combos: &[(f32, f32, f32, f32)] = &[
+            (100.0, -100.0, 100.0, -100.0),
+            (-100.0, 100.0, -100.0, 100.0),
+            (50.0, 50.0, 50.0, 50.0),
+            (-50.0, -50.0, -50.0, -50.0),
+            (80.0, -40.0, 60.0, -20.0),
+            (0.0, -100.0, 100.0, 0.0),
+            (100.0, 0.0, 0.0, 100.0),
+            (-30.0, 70.0, -80.0, 40.0),
+        ];
+        for &(c, h, s, b) in combos {
+            let params = EditParams {
+                contrast: c,
+                highlights: h,
+                shadows: s,
+                blacks: b,
+                ..Default::default()
+            };
+            let lut = build_tone_lut(&params);
+            for i in 1..LUT_SIZE {
+                assert!(
+                    lut[i] >= lut[i - 1],
+                    "LUT not monotonic at {i} for (c={c}, h={h}, s={s}, b={b}): {} < {}",
+                    lut[i],
+                    lut[i - 1]
+                );
+            }
+            assert!(lut[0] >= 0.0);
+            assert!(lut[LUT_SIZE - 1] <= 1.001);
+            assert!(lut.iter().all(|v| v.is_finite()));
+        }
+    }
+
+    #[test]
+    fn hdr_preserves_relative_brightness() {
+        // Two HDR pixels with different luminance should maintain their ordering
+        // and relative differences after tone curve processing.
+        let params = params_with(|p| p.highlights = -80.0);
+
+        let bright = ToneCurve
+            .process_cpu(uniform(1.5, 1.5, 1.5, 1, 1), &params)
+            .unwrap();
+        let very_bright = ToneCurve
+            .process_cpu(uniform(3.0, 3.0, 3.0, 1, 1), &params)
+            .unwrap();
+
+        assert!(
+            very_bright.data[0] > bright.data[0],
+            "3.0 should still be brighter than 1.5 after highlights recovery: {} vs {}",
+            very_bright.data[0],
+            bright.data[0]
+        );
+
+        // The difference should be non-trivial (not collapsed to same value)
+        let diff = very_bright.data[0] - bright.data[0];
+        assert!(
+            diff > 0.1,
+            "HDR values should maintain meaningful brightness difference: {diff}"
+        );
+    }
+
+    #[test]
+    fn hdr_continuous_at_one() {
+        // The tone curve should be continuous at the y=1.0 boundary.
+        // A pixel just below 1.0 and just above should produce nearby outputs.
+        let params = params_with(|p| p.highlights = -60.0);
+
+        let below = ToneCurve
+            .process_cpu(uniform(0.99, 0.99, 0.99, 1, 1), &params)
+            .unwrap();
+        let above = ToneCurve
+            .process_cpu(uniform(1.01, 1.01, 1.01, 1, 1), &params)
+            .unwrap();
+
+        let gap = (above.data[0] - below.data[0]).abs();
+        assert!(
+            gap < 0.05,
+            "output should be continuous at y=1.0: below={} above={} gap={gap}",
+            below.data[0],
+            above.data[0]
+        );
+    }
+
+    #[test]
+    fn gradient_smoothness() {
+        // Sweep 0..1 and check the output doesn't have abrupt jumps.
+        let params = EditParams {
+            contrast: 40.0,
+            highlights: -50.0,
+            shadows: 60.0,
+            blacks: -20.0,
+            ..Default::default()
+        };
+        let lut = build_tone_lut(&params);
+        let step = 1.0 / 1000.0;
+        let mut prev_out = lut_lerp(&lut, 0.0);
+        for i in 1..=1000 {
+            let y = i as f32 * step;
+            let out = lut_lerp(&lut, y);
+            let delta = out - prev_out;
+            // Output step should be at most 10x the input step (generous bound)
+            assert!(
+                delta.abs() < step * 10.0,
+                "output jump too large at y={y}: delta={delta} (threshold={})",
+                step * 10.0
+            );
+            prev_out = out;
+        }
+    }
+
+    #[test]
+    fn s_curve_symmetry() {
+        // f(x, a) + f(1-x, a) = 1 should hold for the symmetric S-curve.
+        for a in [0.5, 1.0, 1.5, 2.0, 3.0] {
+            for i in 0..=20 {
+                let x = i as f32 / 20.0;
+                let sum = s_curve(x, a) + s_curve(1.0 - x, a);
+                assert!(
+                    (sum - 1.0).abs() < 1e-5,
+                    "S-curve symmetry violated: s({x},{a}) + s({},{a}) = {sum}",
+                    1.0 - x
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn saturated_color_preserves_hue() {
+        // A saturated red pixel should maintain its hue (R:G:B ratio)
+        // after moderate tone curve adjustments.
+        let params = params_with(|p| p.contrast = 30.0);
+        let result = ToneCurve
+            .process_cpu(uniform(0.6, 0.1, 0.05, 1, 1), &params)
+            .unwrap();
+
+        let orig_rg = 0.6 / 0.1;
+        let orig_rb = 0.6 / 0.05;
+        let new_rg = result.data[0] / result.data[1];
+        let new_rb = result.data[0] / result.data[2];
+
+        // Luminance-ratio scaling preserves channel ratios exactly
+        assert!(
+            (new_rg - orig_rg).abs() < 0.01,
+            "R/G ratio should be preserved: {new_rg} vs {orig_rg}"
+        );
+        assert!(
+            (new_rb - orig_rb).abs() < 0.01,
+            "R/B ratio should be preserved: {new_rb} vs {orig_rb}"
         );
     }
 }
