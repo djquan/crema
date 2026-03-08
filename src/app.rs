@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use iced::{Element, Task, Theme};
@@ -83,6 +83,10 @@ pub enum EditControl {
 }
 
 const MAX_UNDO_HISTORY: usize = 100;
+
+fn sidecar_path(photo_path: &str) -> PathBuf {
+    Path::new(photo_path).with_extension("crema.json")
+}
 
 pub struct App {
     menu: Option<crate::menu::AppMenu>,
@@ -205,6 +209,9 @@ pub enum Message {
     Export,
     ExportPathSelected(PathBuf),
     ExportComplete(String),
+
+    SaveSidecar,
+    LoadSidecar,
 
     BatchExport,
     BatchExportFolderSelected(PathBuf),
@@ -354,6 +361,8 @@ impl App {
             }
             Message::ImageLoadFailed(id) => self.handle_image_load_failed(id),
             Message::Export => self.handle_export(),
+            Message::SaveSidecar => self.handle_save_sidecar(),
+            Message::LoadSidecar => self.handle_load_sidecar(),
             Message::ExportPathSelected(path) => self.handle_export_path_selected(path),
             Message::ExportComplete(msg) => self.handle_export_complete(msg),
             Message::BatchExport => self.handle_batch_export(),
@@ -924,6 +933,72 @@ impl App {
         )
     }
 
+    fn handle_save_sidecar(&mut self) -> Task<Message> {
+        let Some(photo) = self.current_photo().cloned() else {
+            return Task::none();
+        };
+        let sidecar = sidecar_path(&photo.file_path);
+        match serde_json::to_string_pretty(&self.edit_params) {
+            Ok(json) => match std::fs::write(&sidecar, json) {
+                Ok(()) => {
+                    let name = sidecar
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    self.status_message = format!("Saved sidecar to {name}");
+                }
+                Err(err) => {
+                    error!(%err, "failed to write sidecar");
+                    self.status_message = format!("Failed to save sidecar: {err}");
+                }
+            },
+            Err(err) => {
+                error!(%err, "failed to serialize edits");
+                self.status_message = format!("Failed to save sidecar: {err}");
+            }
+        }
+        Task::none()
+    }
+
+    fn handle_load_sidecar(&mut self) -> Task<Message> {
+        let Some(photo) = self.current_photo().cloned() else {
+            return Task::none();
+        };
+        let sidecar = sidecar_path(&photo.file_path);
+        let data = match std::fs::read_to_string(&sidecar) {
+            Ok(d) => d,
+            Err(err) => {
+                let name = sidecar
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                self.status_message = format!("No sidecar found ({name}): {err}");
+                return Task::none();
+            }
+        };
+        match serde_json::from_str::<EditParams>(&data) {
+            Ok(params) => {
+                self.snapshot_for_undo();
+                self.edit_params = params;
+                self.save_current_edits();
+                let name = sidecar
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                self.status_message = format!("Loaded sidecar from {name}");
+                self.reprocess_image()
+            }
+            Err(err) => {
+                error!(%err, "failed to parse sidecar");
+                self.status_message = format!("Failed to load sidecar: {err}");
+                Task::none()
+            }
+        }
+    }
+
     fn handle_export_path_selected(&mut self, path: PathBuf) -> Task<Message> {
         let Some(ref full_res) = self.current_image else {
             return Task::none();
@@ -1191,6 +1266,8 @@ impl App {
                 && self.current_image.is_some()
                 && self.loaded_photo == self.selected_photo;
             menu.export_item.set_enabled(enabled);
+            menu.save_sidecar_item.set_enabled(enabled);
+            menu.load_sidecar_item.set_enabled(enabled);
         }
     }
 

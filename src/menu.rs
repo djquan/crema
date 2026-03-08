@@ -9,6 +9,8 @@ use crate::app::Message;
 pub struct AppMenu {
     _menu: Menu,
     pub export_item: MenuItem,
+    pub save_sidecar_item: MenuItem,
+    pub load_sidecar_item: MenuItem,
     pub undo_item: MenuItem,
     pub redo_item: MenuItem,
     pub paste_edits_item: MenuItem,
@@ -41,6 +43,15 @@ pub fn build() -> AppMenu {
         Some(Accelerator::new(Some(Modifiers::META), Code::KeyE)),
     );
 
+    let save_sidecar_item = MenuItem::with_id(
+        "save_sidecar",
+        "Save Sidecar",
+        false,
+        Some(Accelerator::new(Some(Modifiers::META), Code::KeyS)),
+    );
+
+    let load_sidecar_item = MenuItem::with_id("load_sidecar", "Load Sidecar", false, None);
+
     let file_menu = Submenu::with_id_and_items(
         "file",
         "File",
@@ -53,6 +64,9 @@ pub fn build() -> AppMenu {
                 Some(Accelerator::new(Some(Modifiers::META), Code::KeyI)),
             ),
             &export_item,
+            &PredefinedMenuItem::separator(),
+            &save_sidecar_item,
+            &load_sidecar_item,
         ],
     )
     .expect("failed to create File menu");
@@ -117,6 +131,8 @@ pub fn build() -> AppMenu {
     AppMenu {
         _menu: menu,
         export_item,
+        save_sidecar_item,
+        load_sidecar_item,
         undo_item,
         redo_item,
         paste_edits_item,
@@ -127,6 +143,8 @@ pub fn subscription() -> Subscription<Message> {
     iced::time::every(Duration::from_millis(50)).map(|_| match MenuEvent::receiver().try_recv() {
         Ok(event) if event.id == "import" => Message::Import,
         Ok(event) if event.id == "export" => Message::Export,
+        Ok(event) if event.id == "save_sidecar" => Message::SaveSidecar,
+        Ok(event) if event.id == "load_sidecar" => Message::LoadSidecar,
         Ok(event) if event.id == "undo" => Message::Undo,
         Ok(event) if event.id == "redo" => Message::Redo,
         Ok(event) if event.id == "copy_edits" => Message::CopyEdits,

@@ -120,6 +120,10 @@ pub fn import_paths(catalog: &Catalog, paths: &[PathBuf]) -> Result<ImportResult
     Ok(result)
 }
 
+fn sidecar_path(photo_path: &Path) -> PathBuf {
+    photo_path.with_extension("crema.json")
+}
+
 pub fn import_file(catalog: &Catalog, path: &Path) -> Result<Option<PhotoId>> {
     let canonical = path
         .canonicalize()
@@ -166,7 +170,34 @@ pub fn import_file(catalog: &Catalog, path: &Path) -> Result<Option<PhotoId>> {
         thumbnail_path: None,
     };
 
-    catalog.insert_photo(&insert)
+    let photo_id = catalog.insert_photo(&insert)?;
+
+    if let Some(id) = photo_id {
+        let sidecar = sidecar_path(&canonical);
+        if sidecar.is_file() {
+            match fs::read_to_string(&sidecar) {
+                Ok(json) => {
+                    match serde_json::from_str::<crema_core::image_buf::EditParams>(&json) {
+                        Ok(params) => {
+                            if let Err(err) = catalog.save_edits(id, &params) {
+                                warn!(?sidecar, %err, "failed to save sidecar edits");
+                            } else {
+                                info!(?sidecar, "loaded sidecar edits on import");
+                            }
+                        }
+                        Err(err) => {
+                            warn!(?sidecar, %err, "failed to parse sidecar JSON");
+                        }
+                    }
+                }
+                Err(err) => {
+                    warn!(?sidecar, %err, "failed to read sidecar file");
+                }
+            }
+        }
+    }
+
+    Ok(photo_id)
 }
 
 #[cfg(test)]
@@ -426,6 +457,59 @@ mod tests {
         assert!(photo.camera_model.is_none());
         assert!(photo.focal_length.is_none());
         assert!(photo.iso.is_none());
+    }
+
+    #[test]
+    fn import_file_loads_sidecar_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpeg_path = create_minimal_jpeg(dir.path(), "edited.jpg", b"has edits");
+
+        let mut params = crema_core::image_buf::EditParams::default();
+        params.exposure = 1.5;
+        params.wb_temp = 5500.0;
+        params.contrast = 0.3;
+        let sidecar = dir.path().join("edited.crema.json");
+        fs::write(&sidecar, serde_json::to_string_pretty(&params).unwrap()).unwrap();
+
+        let catalog = Catalog::open_in_memory().unwrap();
+        let id = import_file(&catalog, &jpeg_path).unwrap().unwrap();
+
+        let edits = catalog.get_edits(id).unwrap();
+        assert!(edits.is_some(), "sidecar edits should be imported");
+        let edits = edits.unwrap();
+        assert!((edits.exposure - 1.5).abs() < f32::EPSILON);
+        assert!((edits.wb_temp - 5500.0).abs() < f32::EPSILON);
+        assert!((edits.contrast - 0.3).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn import_file_no_sidecar_no_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpeg_path = create_minimal_jpeg(dir.path(), "plain.jpg", b"no sidecar");
+        let catalog = Catalog::open_in_memory().unwrap();
+
+        let id = import_file(&catalog, &jpeg_path).unwrap().unwrap();
+        let edits = catalog.get_edits(id).unwrap();
+        assert!(edits.is_none(), "no sidecar means no edits");
+    }
+
+    #[test]
+    fn import_file_invalid_sidecar_still_imports_photo() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpeg_path = create_minimal_jpeg(dir.path(), "bad_sidecar.jpg", b"data");
+
+        let sidecar = dir.path().join("bad_sidecar.crema.json");
+        fs::write(&sidecar, "{ not valid json!!!").unwrap();
+
+        let catalog = Catalog::open_in_memory().unwrap();
+        let id = import_file(&catalog, &jpeg_path).unwrap();
+        assert!(
+            id.is_some(),
+            "photo should still import despite bad sidecar"
+        );
+
+        let edits = catalog.get_edits(id.unwrap()).unwrap();
+        assert!(edits.is_none(), "bad sidecar should not produce edits");
     }
 
     #[test]
