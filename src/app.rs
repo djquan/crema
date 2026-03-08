@@ -15,15 +15,43 @@ use crate::widgets::date_sidebar::{DateExpansionKey, DateFilter};
 use crate::widgets::histogram::HistogramData;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ViewMode {
-    Grid,
-    Photo,
+pub enum Workspace {
+    Library,
+    Develop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PanelSection {
+    Histogram,
+    Light,
+    Color,
+    Metadata,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditSection {
+    Light,
+    Color,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditControl {
+    Exposure,
+    Contrast,
+    Highlights,
+    Shadows,
+    Blacks,
+    WbTemp,
+    WbTint,
+    Vibrance,
+    Saturation,
 }
 
 pub struct App {
     menu: Option<crate::menu::AppMenu>,
-    view_mode: ViewMode,
+    workspace: Workspace,
     selected_photo: Option<PhotoId>,
+    loaded_photo: Option<PhotoId>,
     right_panel_open: bool,
     catalog: Option<Catalog>,
     catalog_path: Option<String>,
@@ -41,27 +69,29 @@ pub struct App {
 
     processing_generation: u64,
     thumbnail_cache_dir: Option<PathBuf>,
+    is_importing: bool,
+    is_exporting: bool,
+    is_loading_photo: bool,
+    is_processing: bool,
 
     date_filter: DateFilter,
     expanded_dates: HashSet<DateExpansionKey>,
+    panel_sections: HashSet<PanelSection>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    // Navigation
     SelectPhoto(PhotoId),
-    SetViewMode(ViewMode),
+    OpenPhoto(PhotoId),
+    SetWorkspace(Workspace),
     ToggleRightPanel,
 
-    // Import
     Import,
     ImportsSelected(Vec<PathBuf>),
     ImportComplete(usize, usize),
 
-    // Thumbnails
     ThumbnailReady(PhotoId, Vec<u8>),
 
-    // Editing
     ExposureChanged(f32),
     ContrastChanged(f32),
     HighlightsChanged(f32),
@@ -74,23 +104,23 @@ pub enum Message {
     AutoEnhance,
     AutoEnhanceComplete(EditParams),
     ResetEdits,
+    ResetControl(EditControl),
+    ResetSection(EditSection),
 
-    // Image loading
     ImageLoaded(PhotoId, Arc<ImageBuf>, Arc<ImageBuf>, Vec<(String, String)>),
     ImageProcessed(u64, iced::widget::image::Handle, Box<HistogramData>),
+    ImageLoadFailed(PhotoId),
 
-    // Catalog
     CatalogOpened(String),
     PhotosListed(Vec<Photo>),
 
-    // Export
     Export,
     ExportPathSelected(PathBuf),
     ExportComplete(String),
 
-    // Date sidebar
     SetDateFilter(DateFilter),
     ToggleDateExpansion(DateExpansionKey),
+    TogglePanelSection(PanelSection),
 
     Noop,
 }
@@ -99,9 +129,10 @@ impl App {
     pub fn new() -> (Self, Task<Message>) {
         let app = Self {
             menu: None,
-            view_mode: ViewMode::Grid,
+            workspace: Workspace::Library,
             selected_photo: None,
-            right_panel_open: false,
+            loaded_photo: None,
+            right_panel_open: true,
             catalog: None,
             catalog_path: None,
             photos: Vec::new(),
@@ -115,8 +146,17 @@ impl App {
             status_message: "Welcome to Crema. Import photos to get started.".into(),
             processing_generation: 0,
             thumbnail_cache_dir: dirs::cache_dir().map(|d| d.join("crema").join("thumbnails")),
+            is_importing: false,
+            is_exporting: false,
+            is_loading_photo: false,
+            is_processing: false,
             date_filter: DateFilter::All,
             expanded_dates: HashSet::new(),
+            panel_sections: HashSet::from([
+                PanelSection::Histogram,
+                PanelSection::Light,
+                PanelSection::Color,
+            ]),
         };
 
         let default_catalog = dirs_catalog_path();
@@ -166,7 +206,8 @@ impl App {
             Message::PhotosListed(photos) => self.handle_photos_listed(photos),
             Message::ThumbnailReady(id, bytes) => self.handle_thumbnail_ready(id, bytes),
             Message::SelectPhoto(id) => self.handle_select_photo(id),
-            Message::SetViewMode(mode) => self.handle_set_view_mode(mode),
+            Message::OpenPhoto(id) => self.open_photo(id),
+            Message::SetWorkspace(workspace) => self.handle_set_workspace(workspace),
             Message::ToggleRightPanel => {
                 self.right_panel_open = !self.right_panel_open;
                 Task::none()
@@ -177,6 +218,7 @@ impl App {
             Message::ImageProcessed(generation, handle, hist) => {
                 self.handle_image_processed(generation, handle, hist)
             }
+            Message::ImageLoadFailed(id) => self.handle_image_load_failed(id),
             Message::Export => self.handle_export(),
             Message::ExportPathSelected(path) => self.handle_export_path_selected(path),
             Message::ExportComplete(msg) => self.handle_export_complete(msg),
@@ -225,13 +267,21 @@ impl App {
                 self.edit_params = EditParams::default();
                 self.reprocess_image()
             }
-            Message::SetDateFilter(f) => {
-                self.date_filter = f;
+            Message::ResetControl(control) => self.reset_control(control),
+            Message::ResetSection(section) => self.reset_section(section),
+            Message::SetDateFilter(filter) => {
+                self.date_filter = filter;
                 Task::none()
             }
             Message::ToggleDateExpansion(key) => {
                 if !self.expanded_dates.remove(&key) {
                     self.expanded_dates.insert(key);
+                }
+                Task::none()
+            }
+            Message::TogglePanelSection(section) => {
+                if !self.panel_sections.remove(&section) {
+                    self.panel_sections.insert(section);
                 }
                 Task::none()
             }
@@ -280,6 +330,8 @@ impl App {
         if paths.is_empty() {
             return Task::none();
         }
+
+        self.is_importing = true;
         self.status_message = format!("Importing {} file(s)...", paths.len());
         let catalog_path = self.catalog_path.clone().unwrap_or_default();
         Task::perform(
@@ -299,6 +351,7 @@ impl App {
     }
 
     fn handle_import_complete(&mut self, imported: usize, errors: usize) -> Task<Message> {
+        self.is_importing = false;
         self.status_message = format!("Imported {imported} photos ({errors} errors)");
         self.refresh_photos()
     }
@@ -306,6 +359,28 @@ impl App {
     fn handle_photos_listed(&mut self, photos: Vec<Photo>) -> Task<Message> {
         self.photos = photos;
         self.status_message = format!("{} photos in catalog", self.photos.len());
+
+        if self
+            .selected_photo
+            .is_some_and(|id| !self.photos.iter().any(|photo| photo.id == id))
+        {
+            self.selected_photo = None;
+        }
+
+        if self
+            .loaded_photo
+            .is_some_and(|id| !self.photos.iter().any(|photo| photo.id == id))
+        {
+            self.loaded_photo = None;
+            self.current_image = None;
+            self.preview_image = None;
+            self.processed_image = None;
+            self.histogram = None;
+            self.current_exif.clear();
+        }
+
+        self.update_export_enabled();
+
         let cache_dir = self.thumbnail_cache_dir.clone();
         let tasks: Vec<_> = self
             .photos
@@ -339,19 +414,43 @@ impl App {
     }
 
     fn handle_select_photo(&mut self, id: PhotoId) -> Task<Message> {
-        if self.selected_photo == Some(id) {
-            self.view_mode = ViewMode::Photo;
+        self.selected_photo = Some(id);
+        self.update_export_enabled();
+
+        if let Some(photo) = self.photos.iter().find(|photo| photo.id == id) {
+            let name = std::path::Path::new(&photo.file_path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            self.status_message = format!("Selected {name}. Open Develop to edit.");
+        }
+
+        Task::none()
+    }
+
+    fn open_photo(&mut self, id: PhotoId) -> Task<Message> {
+        if self.loaded_photo == Some(id) && self.preview_image.is_some() {
+            self.selected_photo = Some(id);
+            self.workspace = Workspace::Develop;
+            self.right_panel_open = true;
+            self.update_export_enabled();
             return Task::none();
         }
 
         self.save_current_edits();
 
         self.selected_photo = Some(id);
-        self.view_mode = ViewMode::Photo;
+        self.workspace = Workspace::Develop;
+        self.right_panel_open = true;
         self.current_image = None;
         self.preview_image = None;
         self.processed_image = None;
         self.histogram = None;
+        self.current_exif.clear();
+        self.loaded_photo = None;
+        self.is_loading_photo = true;
+        self.is_processing = false;
 
         if let Some(ref catalog) = self.catalog {
             if let Ok(Some(edit)) = catalog.get_edits(id) {
@@ -361,10 +460,22 @@ impl App {
             }
         }
 
+        self.update_export_enabled();
+
         let photo = self.photos.iter().find(|p| p.id == id).cloned();
         let Some(photo) = photo else {
+            self.is_loading_photo = false;
+            self.status_message = "Unable to locate that photo.".into();
             return Task::none();
         };
+
+        let name = std::path::Path::new(&photo.file_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        self.status_message = format!("Loading {name}...");
+
         let path = photo.file_path.clone();
         Task::perform(
             async move {
@@ -384,19 +495,32 @@ impl App {
                 );
                 Some((id, Arc::new(buf), Arc::new(preview), exif))
             },
-            |result| match result {
+            move |result| match result {
                 Some((id, buf, preview, exif)) => Message::ImageLoaded(id, buf, preview, exif),
-                None => Message::Noop,
+                None => Message::ImageLoadFailed(id),
             },
         )
     }
 
-    fn handle_set_view_mode(&mut self, mode: ViewMode) -> Task<Message> {
-        if mode == ViewMode::Grid && self.view_mode == ViewMode::Photo {
+    fn handle_set_workspace(&mut self, workspace: Workspace) -> Task<Message> {
+        if workspace == Workspace::Library && self.workspace == Workspace::Develop {
             self.save_current_edits();
         }
-        self.view_mode = mode;
+
+        self.workspace = workspace;
         self.update_export_enabled();
+
+        if workspace == Workspace::Develop {
+            self.right_panel_open = true;
+            if let Some(id) = self.selected_photo {
+                if self.loaded_photo != Some(id) || self.preview_image.is_none() {
+                    return self.open_photo(id);
+                }
+            } else {
+                self.status_message = "Select a photo in Library to open Develop.".into();
+            }
+        }
+
         Task::none()
     }
 
@@ -410,9 +534,13 @@ impl App {
         if self.selected_photo != Some(id) {
             return Task::none();
         }
+
+        self.loaded_photo = Some(id);
         self.current_image = Some(buf);
         self.preview_image = Some(preview);
         self.current_exif = exif;
+        self.is_loading_photo = false;
+        self.status_message = format!("Rendering {}...", self.current_photo_label());
         self.update_export_enabled();
         self.reprocess_image()
     }
@@ -426,9 +554,21 @@ impl App {
         if generation != self.processing_generation {
             return Task::none();
         }
+
         self.processed_image = Some(handle);
         self.histogram = Some(hist);
+        self.is_processing = false;
+        self.status_message = format!("Ready to edit {}", self.current_photo_label());
         self.save_current_edits();
+        Task::none()
+    }
+
+    fn handle_image_load_failed(&mut self, id: PhotoId) -> Task<Message> {
+        if self.selected_photo == Some(id) {
+            self.is_loading_photo = false;
+            self.is_processing = false;
+            self.status_message = "Unable to load that photo.".into();
+        }
         Task::none()
     }
 
@@ -455,7 +595,9 @@ impl App {
         let Some(ref full_res) = self.current_image else {
             return Task::none();
         };
-        self.status_message = "Exporting...".into();
+
+        self.is_exporting = true;
+        self.status_message = format!("Exporting {}...", self.current_photo_label());
         let buf = ImageBuf::clone(full_res);
         let params = self.edit_params.clone();
         Task::perform(
@@ -465,6 +607,7 @@ impl App {
     }
 
     fn handle_export_complete(&mut self, msg: String) -> Task<Message> {
+        self.is_exporting = false;
         self.status_message = msg;
         Task::none()
     }
@@ -503,10 +646,12 @@ impl App {
 
     fn reprocess_image(&mut self) -> Task<Message> {
         let Some(ref preview) = self.preview_image else {
+            self.is_processing = false;
             return Task::none();
         };
 
         self.processing_generation += 1;
+        self.is_processing = true;
         let generation = self.processing_generation;
         let buf = preview.clone();
         let params = self.edit_params.clone();
@@ -537,7 +682,7 @@ impl App {
     }
 
     fn save_current_edits(&self) {
-        if let (Some(id), Some(catalog)) = (self.selected_photo, &self.catalog)
+        if let (Some(id), Some(catalog)) = (self.loaded_photo, &self.catalog)
             && let Err(err) = catalog.save_edits(id, &self.edit_params)
         {
             error!(%err, "failed to save edits");
@@ -546,13 +691,59 @@ impl App {
 
     fn update_export_enabled(&self) {
         if let Some(menu) = &self.menu {
-            let enabled = self.selected_photo.is_some() && self.current_image.is_some();
+            let enabled =
+                self.selected_photo.is_some() && self.current_image.is_some() && self.loaded_photo == self.selected_photo;
             menu.export_item.set_enabled(enabled);
         }
     }
 
+    fn reset_control(&mut self, control: EditControl) -> Task<Message> {
+        let defaults = EditParams::default();
+
+        match control {
+            EditControl::Exposure => self.edit_params.exposure = defaults.exposure,
+            EditControl::Contrast => self.edit_params.contrast = defaults.contrast,
+            EditControl::Highlights => self.edit_params.highlights = defaults.highlights,
+            EditControl::Shadows => self.edit_params.shadows = defaults.shadows,
+            EditControl::Blacks => self.edit_params.blacks = defaults.blacks,
+            EditControl::WbTemp => self.edit_params.wb_temp = defaults.wb_temp,
+            EditControl::WbTint => self.edit_params.wb_tint = defaults.wb_tint,
+            EditControl::Vibrance => self.edit_params.vibrance = defaults.vibrance,
+            EditControl::Saturation => self.edit_params.saturation = defaults.saturation,
+        }
+
+        self.reprocess_image()
+    }
+
+    fn reset_section(&mut self, section: EditSection) -> Task<Message> {
+        let defaults = EditParams::default();
+
+        match section {
+            EditSection::Light => {
+                self.edit_params.exposure = defaults.exposure;
+                self.edit_params.contrast = defaults.contrast;
+                self.edit_params.highlights = defaults.highlights;
+                self.edit_params.shadows = defaults.shadows;
+                self.edit_params.blacks = defaults.blacks;
+            }
+            EditSection::Color => {
+                self.edit_params.wb_temp = defaults.wb_temp;
+                self.edit_params.wb_tint = defaults.wb_tint;
+                self.edit_params.vibrance = defaults.vibrance;
+                self.edit_params.saturation = defaults.saturation;
+            }
+        }
+
+        self.reprocess_image()
+    }
+
     pub fn photos(&self) -> &[Photo] {
         &self.photos
+    }
+
+    pub fn current_photo(&self) -> Option<&Photo> {
+        self.selected_photo
+            .and_then(|id| self.photos.iter().find(|photo| photo.id == id))
     }
 
     pub fn thumbnails(&self) -> &std::collections::HashMap<PhotoId, iced::widget::image::Handle> {
@@ -583,6 +774,29 @@ impl App {
         &self.status_message
     }
 
+    pub fn footer_status(&self) -> String {
+        let mut states = Vec::new();
+
+        if self.is_importing {
+            states.push("Importing");
+        }
+        if self.is_loading_photo {
+            states.push("Loading photo");
+        }
+        if self.is_processing {
+            states.push("Rendering preview");
+        }
+        if self.is_exporting {
+            states.push("Exporting");
+        }
+
+        if states.is_empty() {
+            self.status_message.clone()
+        } else {
+            format!("{}  |  {}", states.join(" · "), self.status_message)
+        }
+    }
+
     pub fn date_filter(&self) -> &DateFilter {
         &self.date_filter
     }
@@ -594,12 +808,12 @@ impl App {
     pub fn filtered_photos(&self) -> Vec<&Photo> {
         self.photos
             .iter()
-            .filter(|p| self.date_filter.matches(p))
+            .filter(|photo| self.date_filter.matches(photo))
             .collect()
     }
 
-    pub fn view_mode(&self) -> ViewMode {
-        self.view_mode
+    pub fn workspace(&self) -> Workspace {
+        self.workspace
     }
 
     pub fn selected_photo(&self) -> Option<PhotoId> {
@@ -610,8 +824,91 @@ impl App {
         self.right_panel_open
     }
 
+    pub fn is_panel_open(&self, section: PanelSection) -> bool {
+        self.panel_sections.contains(&section)
+    }
+
+    pub fn is_loading_photo(&self) -> bool {
+        self.is_loading_photo
+    }
+
+    pub fn is_processing(&self) -> bool {
+        self.is_processing
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.selected_photo.is_some()
+    }
+
+    pub fn can_export(&self) -> bool {
+        self.selected_photo.is_some()
+            && self.current_image.is_some()
+            && self.loaded_photo == self.selected_photo
+    }
+
+    pub fn current_photo_label(&self) -> String {
+        let Some(photo) = self.current_photo() else {
+            return "No photo selected".into();
+        };
+
+        std::path::Path::new(&photo.file_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    }
+
+    pub fn current_photo_summary(&self) -> String {
+        let Some(photo) = self.current_photo() else {
+            return "Select a photo in Library to edit it in Develop.".into();
+        };
+
+        let mut parts = Vec::new();
+
+        if let Some(model) = &photo.camera_model {
+            parts.push(model.clone());
+        }
+        if let Some(lens) = &photo.lens {
+            parts.push(lens.clone());
+        }
+        if let Some(focal_length) = photo.focal_length {
+            parts.push(format!("{focal_length:.0}mm"));
+        }
+        if let Some(aperture) = photo.aperture {
+            parts.push(format!("f/{aperture:.1}"));
+        }
+        if let Some(shutter) = &photo.shutter_speed {
+            parts.push(shutter.clone());
+        }
+        if let Some(iso) = photo.iso {
+            parts.push(format!("ISO {iso}"));
+        }
+
+        if parts.is_empty() {
+            "Preview fit".into()
+        } else {
+            parts.join(" · ")
+        }
+    }
+
+    pub fn is_control_adjusted(&self, control: EditControl) -> bool {
+        let defaults = EditParams::default();
+
+        match control {
+            EditControl::Exposure => self.edit_params.exposure != defaults.exposure,
+            EditControl::Contrast => self.edit_params.contrast != defaults.contrast,
+            EditControl::Highlights => self.edit_params.highlights != defaults.highlights,
+            EditControl::Shadows => self.edit_params.shadows != defaults.shadows,
+            EditControl::Blacks => self.edit_params.blacks != defaults.blacks,
+            EditControl::WbTemp => self.edit_params.wb_temp != defaults.wb_temp,
+            EditControl::WbTint => self.edit_params.wb_tint != defaults.wb_tint,
+            EditControl::Vibrance => self.edit_params.vibrance != defaults.vibrance,
+            EditControl::Saturation => self.edit_params.saturation != defaults.saturation,
+        }
+    }
+
     fn default_export_filename(&self) -> String {
-        if let Some(id) = self.selected_photo
+        if let Some(id) = self.loaded_photo
             && let Some(photo) = self.photos.iter().find(|p| p.id == id)
             && let Some(stem) = std::path::Path::new(&photo.file_path)
                 .file_stem()
@@ -619,6 +916,7 @@ impl App {
         {
             return format!("{stem}.jpg");
         }
+
         "export.jpg".into()
     }
 }
