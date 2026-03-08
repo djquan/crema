@@ -197,9 +197,10 @@ fn develop_body(app: &App) -> Element<'_, Message> {
         center = center.push(right_panel(app));
     }
 
+    let filtered = app.filtered_photos();
     column![
         center,
-        widgets::filmstrip::view(app.photos(), app.thumbnails(), app.selected_photo())
+        widgets::filmstrip::view(&filtered, app.thumbnails(), app.selected_photo())
     ]
     .width(Length::Fill)
     .height(Length::Fill)

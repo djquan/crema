@@ -16,7 +16,7 @@ const ACCENT: Color = Color::from_rgb(0.26, 0.52, 0.94);
 const MUTED: Color = Color::from_rgb(0.66, 0.66, 0.69);
 
 pub fn view<'a>(
-    photos: &[Photo],
+    photos: &[&Photo],
     thumbnails: &'a HashMap<PhotoId, iced::widget::image::Handle>,
     selected: Option<PhotoId>,
 ) -> Element<'a, Message> {
