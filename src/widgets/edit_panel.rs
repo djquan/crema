@@ -1,14 +1,15 @@
 use iced::widget::{Space, button, column, row, slider, text};
 use iced::{Color, Element, Length};
 
-use crate::app::{App, EditControl, EditSection, Message, PanelSection};
+use crate::app::{App, EditControl, EditSection, Message, PanelSection, Workspace};
 use crate::views::unified::section_card;
 
 const MUTED: Color = Color::from_rgb(0.66, 0.66, 0.69);
 const ACTIVE: Color = Color::from_rgb(0.82, 0.86, 0.95);
+const ACCENT: Color = Color::from_rgb(0.26, 0.52, 0.94);
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    column![
+    let mut sections = column![
         section_card(
             "Light",
             app.is_panel_open(PanelSection::Light),
@@ -24,8 +25,35 @@ pub fn view(app: &App) -> Element<'_, Message> {
             color_controls(app),
         ),
     ]
-    .spacing(10)
-    .into()
+    .spacing(10);
+
+    sections = sections.push(section_card(
+        "HSL",
+        app.is_panel_open(PanelSection::Hsl),
+        Message::TogglePanelSection(PanelSection::Hsl),
+        Some(Message::ResetSection(EditSection::Hsl)),
+        hsl_controls(app),
+    ));
+
+    sections = sections.push(section_card(
+        "Detail",
+        app.is_panel_open(PanelSection::Detail),
+        Message::TogglePanelSection(PanelSection::Detail),
+        Some(Message::ResetSection(EditSection::Detail)),
+        detail_controls(app),
+    ));
+
+    if app.workspace() == Workspace::Develop {
+        sections = sections.push(section_card(
+            "Crop",
+            app.is_panel_open(PanelSection::Crop),
+            Message::TogglePanelSection(PanelSection::Crop),
+            Some(Message::ResetCrop),
+            crop_controls(app),
+        ));
+    }
+
+    sections.into()
 }
 
 fn light_controls(app: &App) -> Element<'_, Message> {
@@ -133,6 +161,131 @@ fn color_controls(app: &App) -> Element<'_, Message> {
         ),
     ]
     .spacing(10)
+    .into()
+}
+
+fn hsl_controls(app: &App) -> Element<'_, Message> {
+    let params = app.edit_params();
+
+    column![
+        control(
+            "Hue",
+            format!("{:+.0}°", params.hsl_hue),
+            -180.0..=180.0,
+            params.hsl_hue,
+            1.0,
+            app.is_control_adjusted(EditControl::HslHue),
+            Message::HslHueChanged,
+            Message::ResetControl(EditControl::HslHue),
+        ),
+        control(
+            "HSL Saturation",
+            format!("{:.0}", params.hsl_saturation),
+            -100.0..=100.0,
+            params.hsl_saturation,
+            1.0,
+            app.is_control_adjusted(EditControl::HslSaturation),
+            Message::HslSaturationChanged,
+            Message::ResetControl(EditControl::HslSaturation),
+        ),
+        control(
+            "Lightness",
+            format!("{:.0}", params.hsl_lightness),
+            -100.0..=100.0,
+            params.hsl_lightness,
+            1.0,
+            app.is_control_adjusted(EditControl::HslLightness),
+            Message::HslLightnessChanged,
+            Message::ResetControl(EditControl::HslLightness),
+        ),
+    ]
+    .spacing(10)
+    .into()
+}
+
+fn detail_controls(app: &App) -> Element<'_, Message> {
+    let params = app.edit_params();
+
+    column![
+        control(
+            "Amount",
+            format!("{:.0}", params.sharpen_amount),
+            0.0..=150.0,
+            params.sharpen_amount,
+            1.0,
+            app.is_control_adjusted(EditControl::SharpenAmount),
+            Message::SharpenAmountChanged,
+            Message::ResetControl(EditControl::SharpenAmount),
+        ),
+        control(
+            "Radius",
+            format!("{:.1}", params.sharpen_radius),
+            0.5..=3.0,
+            params.sharpen_radius,
+            0.1,
+            app.is_control_adjusted(EditControl::SharpenRadius),
+            Message::SharpenRadiusChanged,
+            Message::ResetControl(EditControl::SharpenRadius),
+        ),
+    ]
+    .spacing(10)
+    .into()
+}
+
+fn crop_controls(app: &App) -> Element<'_, Message> {
+    let crop_active = app.crop_mode();
+    let current_aspect = app.crop_aspect();
+
+    let toggle_label = if crop_active { "Done" } else { "Crop" };
+    let toggle_btn = button(toggle_label)
+        .on_press(Message::ToggleCropMode)
+        .padding([6, 14])
+        .style(move |theme: &iced::Theme, status| {
+            if crop_active {
+                use iced::{Background, Border, Shadow};
+                iced::widget::button::Style {
+                    background: Some(Background::Color(ACCENT)),
+                    text_color: Color::WHITE,
+                    border: Border {
+                        color: ACCENT,
+                        width: 1.0,
+                        radius: 6.0.into(),
+                    },
+                    shadow: Shadow::default(),
+                    snap: false,
+                }
+            } else {
+                iced::widget::button::secondary(theme, status)
+            }
+        });
+
+    let aspects: &[(&str, Option<f32>)] = &[
+        ("Free", None),
+        ("1:1", Some(1.0)),
+        ("4:3", Some(4.0 / 3.0)),
+        ("3:2", Some(3.0 / 2.0)),
+        ("16:9", Some(16.0 / 9.0)),
+    ];
+
+    let mut aspect_row = row![].spacing(4);
+    for &(label, ratio) in aspects {
+        let is_active = current_aspect == ratio;
+        let label_color = if is_active { ACCENT } else { MUTED };
+        aspect_row = aspect_row.push(
+            button(text(label).size(11).color(label_color))
+                .on_press(Message::SetCropAspect(ratio))
+                .padding([3, 6])
+                .style(button::text),
+        );
+    }
+
+    column![
+        row![toggle_btn, Space::new().width(Length::Fill),]
+            .align_y(iced::Alignment::Center)
+            .spacing(8),
+        aspect_row,
+    ]
+    .spacing(8)
     .into()
 }
 

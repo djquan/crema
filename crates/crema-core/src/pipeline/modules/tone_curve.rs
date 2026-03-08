@@ -8,6 +8,10 @@ const LUT_SIZE: usize = 4096;
 
 pub struct ToneCurve;
 
+pub fn build_lut(params: &EditParams) -> Vec<f32> {
+    build_tone_lut(params).to_vec()
+}
+
 impl ProcessingModule for ToneCurve {
     fn name(&self) -> &str {
         "tone_curve"

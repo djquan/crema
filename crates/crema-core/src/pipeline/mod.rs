@@ -2,6 +2,8 @@ pub mod auto_enhance;
 pub mod module;
 pub mod modules;
 
+pub use modules::tone_curve::build_lut as tone_curve_lut;
+
 use anyhow::Result;
 use tracing::debug;
 
@@ -29,6 +31,8 @@ impl Pipeline {
                 Box::new(modules::ToneCurve),
                 Box::new(modules::Vibrance),
                 Box::new(modules::Saturation),
+                Box::new(modules::Hsl),
+                Box::new(modules::Sharpening),
                 Box::new(modules::Crop),
             ],
         }
@@ -129,6 +133,8 @@ mod tests {
                 "tone_curve",
                 "vibrance",
                 "saturation",
+                "hsl",
+                "sharpening",
                 "crop",
             ]
         );

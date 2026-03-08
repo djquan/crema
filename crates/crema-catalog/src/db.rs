@@ -72,6 +72,11 @@ impl Catalog {
             "ALTER TABLE edits ADD COLUMN blacks REAL NOT NULL DEFAULT 0.0",
             "ALTER TABLE edits ADD COLUMN vibrance REAL NOT NULL DEFAULT 0.0",
             "ALTER TABLE edits ADD COLUMN saturation REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE edits ADD COLUMN hsl_hue REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE edits ADD COLUMN hsl_saturation REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE edits ADD COLUMN hsl_lightness REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE edits ADD COLUMN sharpen_amount REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE edits ADD COLUMN sharpen_radius REAL NOT NULL DEFAULT 1.0",
             "ALTER TABLE photos ADD COLUMN rating INTEGER NOT NULL DEFAULT 0",
         ];
         for stmt in alter_stmts {
@@ -153,6 +158,8 @@ impl Catalog {
         let mut stmt = self.conn.prepare(
             "SELECT id, photo_id, exposure, wb_temp, wb_tint,
                     contrast, highlights, shadows, blacks, vibrance, saturation,
+                    hsl_hue, hsl_saturation, hsl_lightness,
+                    sharpen_amount, sharpen_radius,
                     crop_x, crop_y, crop_w, crop_h, updated_at
              FROM edits WHERE photo_id = ?1",
         )?;
@@ -169,11 +176,16 @@ impl Catalog {
                 blacks: row.get(8)?,
                 vibrance: row.get(9)?,
                 saturation: row.get(10)?,
-                crop_x: row.get(11)?,
-                crop_y: row.get(12)?,
-                crop_w: row.get(13)?,
-                crop_h: row.get(14)?,
-                updated_at: row.get(15)?,
+                hsl_hue: row.get(11)?,
+                hsl_saturation: row.get(12)?,
+                hsl_lightness: row.get(13)?,
+                sharpen_amount: row.get(14)?,
+                sharpen_radius: row.get(15)?,
+                crop_x: row.get(16)?,
+                crop_y: row.get(17)?,
+                crop_w: row.get(18)?,
+                crop_h: row.get(19)?,
+                updated_at: row.get(20)?,
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -187,8 +199,10 @@ impl Catalog {
         self.conn.execute(
             "INSERT INTO edits (photo_id, exposure, wb_temp, wb_tint,
                                 contrast, highlights, shadows, blacks, vibrance, saturation,
+                                hsl_hue, hsl_saturation, hsl_lightness,
+                                sharpen_amount, sharpen_radius,
                                 crop_x, crop_y, crop_w, crop_h)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
              ON CONFLICT(photo_id) DO UPDATE SET
                 exposure = excluded.exposure,
                 wb_temp = excluded.wb_temp,
@@ -199,6 +213,11 @@ impl Catalog {
                 blacks = excluded.blacks,
                 vibrance = excluded.vibrance,
                 saturation = excluded.saturation,
+                hsl_hue = excluded.hsl_hue,
+                hsl_saturation = excluded.hsl_saturation,
+                hsl_lightness = excluded.hsl_lightness,
+                sharpen_amount = excluded.sharpen_amount,
+                sharpen_radius = excluded.sharpen_radius,
                 crop_x = excluded.crop_x,
                 crop_y = excluded.crop_y,
                 crop_w = excluded.crop_w,
@@ -215,6 +234,11 @@ impl Catalog {
                 params.blacks,
                 params.vibrance,
                 params.saturation,
+                params.hsl_hue,
+                params.hsl_saturation,
+                params.hsl_lightness,
+                params.sharpen_amount,
+                params.sharpen_radius,
                 params.crop_x,
                 params.crop_y,
                 params.crop_w,
@@ -514,6 +538,11 @@ mod tests {
             blacks: -15.0,
             vibrance: 20.0,
             saturation: -10.0,
+            hsl_hue: 30.0,
+            hsl_saturation: -20.0,
+            hsl_lightness: 15.0,
+            sharpen_amount: 50.0,
+            sharpen_radius: 1.5,
             crop_x: 0.1,
             crop_y: 0.2,
             crop_w: 0.5,

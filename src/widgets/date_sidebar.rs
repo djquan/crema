@@ -16,6 +16,22 @@ pub enum DateFilter {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RatingFilter {
+    #[default]
+    All,
+    AtLeast(i32),
+}
+
+impl RatingFilter {
+    pub fn matches(&self, photo: &Photo) -> bool {
+        match self {
+            RatingFilter::All => true,
+            RatingFilter::AtLeast(min) => photo.rating >= *min,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DateExpansionKey {
     Year(u16),
@@ -152,11 +168,13 @@ const SIDEBAR_WIDTH: f32 = 220.0;
 const BG: Color = Color::from_rgb(0.10, 0.10, 0.11);
 const BORDER: Color = Color::from_rgb(0.20, 0.20, 0.22);
 const MUTED: Color = Color::from_rgb(0.66, 0.66, 0.69);
+const ACCENT: Color = Color::from_rgb(0.26, 0.52, 0.94);
 
 pub fn view<'a>(
     photos: &[Photo],
     active_filter: &DateFilter,
     expanded: &HashSet<DateExpansionKey>,
+    rating_filter: RatingFilter,
 ) -> Element<'a, Message> {
     let tree = build_date_tree(photos);
     let mut items: Vec<Element<'a, Message>> = vec![
@@ -237,6 +255,10 @@ pub fn view<'a>(
         ));
     }
 
+    items.push(Space::new().height(8).into());
+    items.push(text("Filter By Rating").size(13).color(MUTED).into());
+    items.push(rating_filter_row(rating_filter));
+
     container(scrollable(column(items).spacing(4).padding(10)).height(Length::Fill))
         .style(|_theme: &Theme| container::Style {
             background: Some(Background::Color(BG)),
@@ -250,6 +272,36 @@ pub fn view<'a>(
         .width(SIDEBAR_WIDTH)
         .height(Length::Fill)
         .into()
+}
+
+fn rating_filter_row(active: RatingFilter) -> Element<'static, Message> {
+    let options: &[(RatingFilter, &str)] = &[
+        (RatingFilter::All, "All"),
+        (RatingFilter::AtLeast(1), "★+"),
+        (RatingFilter::AtLeast(2), "★★+"),
+        (RatingFilter::AtLeast(3), "★★★+"),
+        (RatingFilter::AtLeast(4), "★★★★+"),
+        (RatingFilter::AtLeast(5), "★★★★★"),
+    ];
+
+    let mut items = column![].spacing(2);
+    for &(filter, label) in options {
+        let is_active = filter == active;
+        let label_color = if is_active { ACCENT } else { MUTED };
+        items = items.push(
+            button(text(label).size(11).color(label_color))
+                .on_press(Message::SetRatingFilter(filter))
+                .padding(Padding::from([3, 6]))
+                .width(Length::Fill)
+                .style(if is_active {
+                    button::primary
+                } else {
+                    button::text
+                }),
+        );
+    }
+
+    items.into()
 }
 
 fn filter_button<'a>(
@@ -405,6 +457,29 @@ mod tests {
         let photo = make_photo(1, Some("2026-02-05 10:00:00"));
         assert!(DateFilter::Day(2026, 2, 5).matches(&photo));
         assert!(!DateFilter::Day(2026, 2, 4).matches(&photo));
+    }
+
+    #[test]
+    fn rating_filter_all_matches_everything() {
+        let photo = make_photo(1, Some("2026-02-05 10:00:00"));
+        assert!(RatingFilter::All.matches(&photo));
+    }
+
+    #[test]
+    fn rating_filter_at_least() {
+        let mut photo = make_photo(1, Some("2026-02-05 10:00:00"));
+        photo.rating = 3;
+        assert!(RatingFilter::AtLeast(1).matches(&photo));
+        assert!(RatingFilter::AtLeast(3).matches(&photo));
+        assert!(!RatingFilter::AtLeast(4).matches(&photo));
+        assert!(!RatingFilter::AtLeast(5).matches(&photo));
+    }
+
+    #[test]
+    fn rating_filter_unrated() {
+        let photo = make_photo(1, Some("2026-02-05 10:00:00"));
+        assert!(RatingFilter::All.matches(&photo));
+        assert!(!RatingFilter::AtLeast(1).matches(&photo));
     }
 
     #[test]

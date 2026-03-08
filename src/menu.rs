@@ -11,6 +11,7 @@ pub struct AppMenu {
     pub export_item: MenuItem,
     pub undo_item: MenuItem,
     pub redo_item: MenuItem,
+    pub paste_edits_item: MenuItem,
 }
 
 pub fn build() -> AppMenu {
@@ -73,8 +74,39 @@ pub fn build() -> AppMenu {
         )),
     );
 
-    let edit_menu = Submenu::with_id_and_items("edit", "Edit", true, &[&undo_item, &redo_item])
-        .expect("failed to create Edit menu");
+    let copy_edits_item = MenuItem::with_id(
+        "copy_edits",
+        "Copy Edits",
+        true,
+        Some(Accelerator::new(
+            Some(Modifiers::META | Modifiers::SHIFT),
+            Code::KeyC,
+        )),
+    );
+
+    let paste_edits_item = MenuItem::with_id(
+        "paste_edits",
+        "Paste Edits",
+        false,
+        Some(Accelerator::new(
+            Some(Modifiers::META | Modifiers::SHIFT),
+            Code::KeyV,
+        )),
+    );
+
+    let edit_menu = Submenu::with_id_and_items(
+        "edit",
+        "Edit",
+        true,
+        &[
+            &undo_item,
+            &redo_item,
+            &PredefinedMenuItem::separator(),
+            &copy_edits_item,
+            &paste_edits_item,
+        ],
+    )
+    .expect("failed to create Edit menu");
 
     menu.append_items(&[&app_menu, &file_menu, &edit_menu])
         .expect("failed to append menus");
@@ -87,6 +119,7 @@ pub fn build() -> AppMenu {
         export_item,
         undo_item,
         redo_item,
+        paste_edits_item,
     }
 }
 
@@ -96,6 +129,8 @@ pub fn subscription() -> Subscription<Message> {
         Ok(event) if event.id == "export" => Message::Export,
         Ok(event) if event.id == "undo" => Message::Undo,
         Ok(event) if event.id == "redo" => Message::Redo,
+        Ok(event) if event.id == "copy_edits" => Message::CopyEdits,
+        Ok(event) if event.id == "paste_edits" => Message::PasteEdits,
         _ => Message::Noop,
     })
 }

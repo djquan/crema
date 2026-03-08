@@ -8,10 +8,22 @@ use tracing::{error, info};
 use crema_catalog::db::Catalog;
 use crema_catalog::models::{Photo, PhotoId};
 use crema_core::image_buf::{EditParams, ImageBuf};
+use crema_gpu::context::GpuContext;
+use crema_gpu::pipeline::GpuPipeline;
 use crema_thumbnails::cache::ThumbnailCache;
 
+type GpuHandle = Arc<std::sync::Mutex<(GpuContext, GpuPipeline)>>;
+
+#[derive(Clone)]
+pub(crate) struct GpuReady(GpuHandle);
+impl std::fmt::Debug for GpuReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GpuReady")
+    }
+}
+
 use crate::views;
-use crate::widgets::date_sidebar::{DateExpansionKey, DateFilter};
+use crate::widgets::date_sidebar::{DateExpansionKey, DateFilter, RatingFilter};
 use crate::widgets::histogram::HistogramData;
 use crate::widgets::zoomable_image::ZoomState;
 
@@ -26,6 +38,9 @@ pub enum PanelSection {
     Histogram,
     Light,
     Color,
+    Hsl,
+    Detail,
+    Crop,
     Metadata,
 }
 
@@ -33,6 +48,8 @@ pub enum PanelSection {
 pub enum EditSection {
     Light,
     Color,
+    Hsl,
+    Detail,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +63,11 @@ pub enum EditControl {
     WbTint,
     Vibrance,
     Saturation,
+    HslHue,
+    HslSaturation,
+    HslLightness,
+    SharpenAmount,
+    SharpenRadius,
 }
 
 const MAX_UNDO_HISTORY: usize = 100;
@@ -70,11 +92,14 @@ pub struct App {
 
     undo_stack: Vec<EditParams>,
     redo_stack: Vec<EditParams>,
+    edit_clipboard: Option<EditParams>,
 
     zoom_state: ZoomState,
     preview_dimensions: (u32, u32),
     original_display: Option<iced::widget::image::Handle>,
     showing_before: bool,
+    crop_mode: bool,
+    crop_aspect: Option<f32>,
 
     status_message: String,
 
@@ -85,7 +110,10 @@ pub struct App {
     is_loading_photo: bool,
     is_processing: bool,
 
+    gpu: Option<GpuHandle>,
+
     date_filter: DateFilter,
+    rating_filter: RatingFilter,
     expanded_dates: HashSet<DateExpansionKey>,
     panel_sections: HashSet<PanelSection>,
 }
@@ -112,6 +140,11 @@ pub enum Message {
     WbTintChanged(f32),
     VibranceChanged(f32),
     SaturationChanged(f32),
+    HslHueChanged(f32),
+    HslSaturationChanged(f32),
+    HslLightnessChanged(f32),
+    SharpenAmountChanged(f32),
+    SharpenRadiusChanged(f32),
     AutoEnhance,
     AutoEnhanceComplete(EditParams),
     ResetEdits,
@@ -119,6 +152,8 @@ pub enum Message {
     ResetSection(EditSection),
     Undo,
     Redo,
+    CopyEdits,
+    PasteEdits,
     ZoomAtPoint(f32, f32, f32, f32, f32),
     PanDelta(f32, f32),
     ResetZoom,
@@ -129,10 +164,17 @@ pub enum Message {
     NudgeExposure(f32),
     SetRating(i32),
     DeletePhoto,
+    ToggleCropMode,
+    ExitCropMode,
+    SetCropAspect(Option<f32>),
+    UpdateCrop(f32, f32, f32, f32),
+    ResetCrop,
 
     ImageLoaded(PhotoId, Arc<ImageBuf>, Arc<ImageBuf>, Vec<(String, String)>),
     ImageProcessed(u64, iced::widget::image::Handle, Box<HistogramData>),
     ImageLoadFailed(PhotoId),
+
+    GpuInitDone(Option<GpuReady>),
 
     CatalogOpened(String),
     PhotosListed(Vec<Photo>),
@@ -142,6 +184,7 @@ pub enum Message {
     ExportComplete(String),
 
     SetDateFilter(DateFilter),
+    SetRatingFilter(RatingFilter),
     ToggleDateExpansion(DateExpansionKey),
     TogglePanelSection(PanelSection),
 
@@ -168,10 +211,13 @@ impl App {
             current_exif: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            edit_clipboard: None,
             zoom_state: ZoomState::default(),
             preview_dimensions: (0, 0),
             original_display: None,
             showing_before: false,
+            crop_mode: false,
+            crop_aspect: None,
             status_message: "Welcome to Crema. Import photos to get started.".into(),
             processing_generation: 0,
             thumbnail_cache_dir: dirs::cache_dir().map(|d| d.join("crema").join("thumbnails")),
@@ -179,7 +225,10 @@ impl App {
             is_exporting: false,
             is_loading_photo: false,
             is_processing: false,
+            gpu: None,
+
             date_filter: DateFilter::All,
+            rating_filter: RatingFilter::All,
             expanded_dates: HashSet::new(),
             panel_sections: HashSet::from([
                 PanelSection::Histogram,
@@ -189,9 +238,25 @@ impl App {
         };
 
         let default_catalog = dirs_catalog_path();
-        let task = Task::perform(async move { default_catalog }, Message::CatalogOpened);
+        let catalog_task = Task::perform(async move { default_catalog }, Message::CatalogOpened);
 
-        (app, task)
+        let gpu_task = Task::perform(
+            async {
+                match GpuContext::new().await {
+                    Ok(ctx) => {
+                        let pipeline = GpuPipeline::new(&ctx);
+                        Some(GpuReady(Arc::new(std::sync::Mutex::new((ctx, pipeline)))))
+                    }
+                    Err(e) => {
+                        tracing::warn!("GPU init failed, using CPU pipeline: {e}");
+                        None
+                    }
+                }
+            },
+            Message::GpuInitDone,
+        );
+
+        (app, Task::batch([catalog_task, gpu_task]))
     }
 
     pub fn title(&self) -> String {
@@ -226,6 +291,13 @@ impl App {
         }
 
         match message {
+            Message::GpuInitDone(ready) => {
+                if let Some(GpuReady(handle)) = ready {
+                    info!("GPU pipeline ready");
+                    self.gpu = Some(handle);
+                }
+                Task::none()
+            }
             Message::CatalogOpened(path) => self.handle_catalog_opened(path),
             Message::Import => self.handle_import(),
             Message::ImportsSelected(paths) => self.handle_imports_selected(paths),
@@ -296,6 +368,31 @@ impl App {
                 self.edit_params.saturation = v;
                 self.reprocess_image()
             }
+            Message::HslHueChanged(v) => {
+                self.snapshot_for_undo();
+                self.edit_params.hsl_hue = v;
+                self.reprocess_image()
+            }
+            Message::HslSaturationChanged(v) => {
+                self.snapshot_for_undo();
+                self.edit_params.hsl_saturation = v;
+                self.reprocess_image()
+            }
+            Message::HslLightnessChanged(v) => {
+                self.snapshot_for_undo();
+                self.edit_params.hsl_lightness = v;
+                self.reprocess_image()
+            }
+            Message::SharpenAmountChanged(v) => {
+                self.snapshot_for_undo();
+                self.edit_params.sharpen_amount = v;
+                self.reprocess_image()
+            }
+            Message::SharpenRadiusChanged(v) => {
+                self.snapshot_for_undo();
+                self.edit_params.sharpen_radius = v;
+                self.reprocess_image()
+            }
             Message::AutoEnhance => self.handle_auto_enhance(),
             Message::AutoEnhanceComplete(params) => {
                 self.snapshot_for_undo();
@@ -311,6 +408,32 @@ impl App {
             Message::ResetSection(section) => self.reset_section(section),
             Message::Undo => self.handle_undo(),
             Message::Redo => self.handle_redo(),
+            Message::CopyEdits => {
+                self.edit_clipboard = Some(self.edit_params.clone());
+                self.status_message = "Copied edits".into();
+                self.update_paste_menu_state();
+                Task::none()
+            }
+            Message::PasteEdits => {
+                if let Some(clipboard) = self.edit_clipboard.clone() {
+                    self.snapshot_for_undo();
+                    let crop = (
+                        self.edit_params.crop_x,
+                        self.edit_params.crop_y,
+                        self.edit_params.crop_w,
+                        self.edit_params.crop_h,
+                    );
+                    self.edit_params = clipboard;
+                    self.edit_params.crop_x = crop.0;
+                    self.edit_params.crop_y = crop.1;
+                    self.edit_params.crop_w = crop.2;
+                    self.edit_params.crop_h = crop.3;
+                    self.status_message = "Pasted edits".into();
+                    self.reprocess_image()
+                } else {
+                    Task::none()
+                }
+            }
             Message::ZoomAtPoint(factor, cx, cy, vw, vh) => {
                 self.handle_zoom_at_point(factor, cx, cy, vw, vh);
                 Task::none()
@@ -343,8 +466,46 @@ impl App {
             }
             Message::SetRating(rating) => self.handle_set_rating(rating),
             Message::DeletePhoto => self.handle_delete_photo(),
+            Message::ToggleCropMode => self.handle_toggle_crop_mode(),
+            Message::ExitCropMode => {
+                if self.crop_mode {
+                    self.handle_toggle_crop_mode()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::SetCropAspect(aspect) => {
+                self.crop_aspect = aspect;
+                if let Some(ratio) = aspect {
+                    self.apply_aspect_ratio(ratio);
+                }
+                Task::none()
+            }
+            Message::UpdateCrop(x, y, w, h) => {
+                self.edit_params.crop_x = x;
+                self.edit_params.crop_y = y;
+                self.edit_params.crop_w = w;
+                self.edit_params.crop_h = h;
+                Task::none()
+            }
+            Message::ResetCrop => {
+                self.snapshot_for_undo();
+                self.edit_params.crop_x = 0.0;
+                self.edit_params.crop_y = 0.0;
+                self.edit_params.crop_w = 1.0;
+                self.edit_params.crop_h = 1.0;
+                if self.crop_mode {
+                    Task::none()
+                } else {
+                    self.reprocess_image()
+                }
+            }
             Message::SetDateFilter(filter) => {
                 self.date_filter = filter;
+                Task::none()
+            }
+            Message::SetRatingFilter(filter) => {
+                self.rating_filter = filter;
                 Task::none()
             }
             Message::ToggleDateExpansion(key) => {
@@ -493,6 +654,7 @@ impl App {
         self.zoom_state = ZoomState::default();
         self.original_display = None;
         self.showing_before = false;
+        self.crop_mode = false;
 
         self.selected_photo = Some(id);
         self.workspace = Workspace::Develop;
@@ -730,19 +892,32 @@ impl App {
         self.is_processing = true;
         let generation = self.processing_generation;
         let buf = preview.clone();
-        let params = self.edit_params.clone();
+        let mut params = self.edit_params.clone();
+        if self.crop_mode {
+            params.crop_x = 0.0;
+            params.crop_y = 0.0;
+            params.crop_w = 1.0;
+            params.crop_h = 1.0;
+        }
+
+        let gpu = self.gpu.clone();
 
         Task::perform(
             async move {
-                let pipeline = crema_core::pipeline::Pipeline::new();
-                let owned = ImageBuf::clone(&buf);
-                let result = pipeline.process_cpu(owned, &params);
-                let (w, h, rgba) = match result {
-                    Ok(processed) => {
-                        let rgba = processed.to_rgba_u8_srgb();
-                        (processed.width, processed.height, rgba)
+                let gpu_result = gpu.and_then(|g| process_gpu(&g, &buf, &params));
+
+                let processed = gpu_result.or_else(|| {
+                    let pipeline = crema_core::pipeline::Pipeline::new();
+                    let owned = ImageBuf::clone(&buf);
+                    pipeline.process_cpu(owned, &params).ok()
+                });
+
+                let (w, h, rgba) = match processed {
+                    Some(img) => {
+                        let rgba = img.to_rgba_u8_srgb();
+                        (img.width, img.height, rgba)
                     }
-                    Err(_) => {
+                    None => {
                         let rgba = buf.to_rgba_u8_srgb();
                         (buf.width, buf.height, rgba)
                     }
@@ -817,6 +992,11 @@ impl App {
             EditControl::WbTint => self.edit_params.wb_tint = defaults.wb_tint,
             EditControl::Vibrance => self.edit_params.vibrance = defaults.vibrance,
             EditControl::Saturation => self.edit_params.saturation = defaults.saturation,
+            EditControl::HslHue => self.edit_params.hsl_hue = defaults.hsl_hue,
+            EditControl::HslSaturation => self.edit_params.hsl_saturation = defaults.hsl_saturation,
+            EditControl::HslLightness => self.edit_params.hsl_lightness = defaults.hsl_lightness,
+            EditControl::SharpenAmount => self.edit_params.sharpen_amount = defaults.sharpen_amount,
+            EditControl::SharpenRadius => self.edit_params.sharpen_radius = defaults.sharpen_radius,
         }
 
         self.reprocess_image()
@@ -839,6 +1019,15 @@ impl App {
                 self.edit_params.wb_tint = defaults.wb_tint;
                 self.edit_params.vibrance = defaults.vibrance;
                 self.edit_params.saturation = defaults.saturation;
+            }
+            EditSection::Hsl => {
+                self.edit_params.hsl_hue = defaults.hsl_hue;
+                self.edit_params.hsl_saturation = defaults.hsl_saturation;
+                self.edit_params.hsl_lightness = defaults.hsl_lightness;
+            }
+            EditSection::Detail => {
+                self.edit_params.sharpen_amount = defaults.sharpen_amount;
+                self.edit_params.sharpen_radius = defaults.sharpen_radius;
             }
         }
 
@@ -887,6 +1076,13 @@ impl App {
         if let Some(menu) = &self.menu {
             menu.undo_item.set_enabled(!self.undo_stack.is_empty());
             menu.redo_item.set_enabled(!self.redo_stack.is_empty());
+        }
+    }
+
+    fn update_paste_menu_state(&self) {
+        if let Some(menu) = &self.menu {
+            menu.paste_edits_item
+                .set_enabled(self.edit_clipboard.is_some());
         }
     }
 
@@ -944,6 +1140,52 @@ impl App {
         }
     }
 
+    fn handle_toggle_crop_mode(&mut self) -> Task<Message> {
+        if self.preview_image.is_none() {
+            return Task::none();
+        }
+        self.crop_mode = !self.crop_mode;
+        if self.crop_mode {
+            self.snapshot_for_undo();
+        }
+        self.reprocess_image()
+    }
+
+    fn apply_aspect_ratio(&mut self, ratio: f32) {
+        let iw = self.preview_dimensions.0 as f32;
+        let ih = self.preview_dimensions.1 as f32;
+        if iw <= 0.0 || ih <= 0.0 {
+            return;
+        }
+
+        let (cx, cy, cw, ch) = (
+            self.edit_params.crop_x,
+            self.edit_params.crop_y,
+            self.edit_params.crop_w,
+            self.edit_params.crop_h,
+        );
+        let center_x = cx + cw / 2.0;
+        let center_y = cy + ch / 2.0;
+
+        let pw = cw * iw;
+        let ph = ch * ih;
+        let current = pw / ph;
+
+        let (new_w, new_h) = if current > ratio {
+            (ph * ratio / iw, ch)
+        } else {
+            (cw, pw / ratio / ih)
+        };
+
+        let new_x = (center_x - new_w / 2.0).clamp(0.0, 1.0 - new_w);
+        let new_y = (center_y - new_h / 2.0).clamp(0.0, 1.0 - new_h);
+
+        self.edit_params.crop_x = new_x;
+        self.edit_params.crop_y = new_y;
+        self.edit_params.crop_w = new_w;
+        self.edit_params.crop_h = new_h;
+    }
+
     fn handle_set_rating(&mut self, rating: i32) -> Task<Message> {
         let Some(id) = self.selected_photo else {
             return Task::none();
@@ -985,6 +1227,14 @@ impl App {
         self.update_export_enabled();
         self.status_message = "Photo removed from catalog.".into();
         Task::none()
+    }
+
+    pub fn crop_mode(&self) -> bool {
+        self.crop_mode
+    }
+
+    pub fn crop_aspect(&self) -> Option<f32> {
+        self.crop_aspect
     }
 
     pub fn zoom_state(&self) -> &ZoomState {
@@ -1074,8 +1324,12 @@ impl App {
     pub fn filtered_photos(&self) -> Vec<&Photo> {
         self.photos
             .iter()
-            .filter(|photo| self.date_filter.matches(photo))
+            .filter(|photo| self.date_filter.matches(photo) && self.rating_filter.matches(photo))
             .collect()
+    }
+
+    pub fn rating_filter(&self) -> RatingFilter {
+        self.rating_filter
     }
 
     pub fn workspace(&self) -> Workspace {
@@ -1170,6 +1424,17 @@ impl App {
             EditControl::WbTint => self.edit_params.wb_tint != defaults.wb_tint,
             EditControl::Vibrance => self.edit_params.vibrance != defaults.vibrance,
             EditControl::Saturation => self.edit_params.saturation != defaults.saturation,
+            EditControl::HslHue => self.edit_params.hsl_hue != defaults.hsl_hue,
+            EditControl::HslSaturation => {
+                self.edit_params.hsl_saturation != defaults.hsl_saturation
+            }
+            EditControl::HslLightness => self.edit_params.hsl_lightness != defaults.hsl_lightness,
+            EditControl::SharpenAmount => {
+                self.edit_params.sharpen_amount != defaults.sharpen_amount
+            }
+            EditControl::SharpenRadius => {
+                self.edit_params.sharpen_radius != defaults.sharpen_radius
+            }
         }
     }
 
@@ -1200,12 +1465,16 @@ fn handle_key_press(
     }
 
     match key {
+        Key::Named(Named::Escape) => Some(Message::ExitCropMode),
         Key::Named(Named::ArrowRight) => Some(Message::NextPhoto),
         Key::Named(Named::ArrowLeft) => Some(Message::PrevPhoto),
         Key::Named(Named::Delete | Named::Backspace) => Some(Message::DeletePhoto),
         Key::Character(c) if c.as_str() == "\\" => Some(Message::ToggleBeforeAfter),
         Key::Character(c) if c.as_str() == "[" => Some(Message::NudgeExposure(-0.5)),
         Key::Character(c) if c.as_str() == "]" => Some(Message::NudgeExposure(0.5)),
+        Key::Character(c) if c.as_str() == "c" && !modifiers.shift() => {
+            Some(Message::ToggleCropMode)
+        }
         Key::Character(c) if c.as_str() == "r" && !modifiers.shift() => Some(Message::ResetEdits),
         Key::Character(c) if c.as_str() == "f" && !modifiers.shift() => Some(Message::ResetZoom),
         Key::Character(c) if matches!(c.as_str(), "0" | "1" | "2" | "3" | "4" | "5") => {
@@ -1214,6 +1483,33 @@ fn handle_key_press(
         }
         _ => None,
     }
+}
+
+fn process_gpu(
+    gpu: &Arc<std::sync::Mutex<(GpuContext, GpuPipeline)>>,
+    buf: &Arc<ImageBuf>,
+    params: &EditParams,
+) -> Option<ImageBuf> {
+    let mut lock = gpu.lock().ok()?;
+    let (ctx, pipeline) = &mut *lock;
+
+    let input =
+        crema_gpu::texture::GpuTexture::from_image_buf(&ctx.device, &ctx.queue, buf, "input");
+    let output = pipeline.process(ctx, &input, params).ok()?;
+    let mut result = output.download(&ctx.device, &ctx.queue).ok()?;
+
+    // Apply sharpening on CPU (not implemented on GPU)
+    if params.sharpen_amount != 0.0 {
+        let sharpening = crema_core::pipeline::modules::Sharpening;
+        result = crema_core::pipeline::module::ProcessingModule::process_cpu(
+            &sharpening,
+            result,
+            params,
+        )
+        .ok()?;
+    }
+
+    Some(result)
 }
 
 fn dirs_catalog_path() -> String {

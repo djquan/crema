@@ -5,6 +5,7 @@ use crema_catalog::models::Photo;
 
 use crate::app::{App, Message, PanelSection, Workspace};
 use crate::widgets;
+use crate::widgets::zoomable_image::CropOverlay;
 
 const APP_BG: Color = Color::from_rgb(0.08, 0.08, 0.09);
 const PANEL_BG: Color = Color::from_rgb(0.12, 0.12, 0.13);
@@ -107,7 +108,12 @@ fn toolbar(app: &App, filtered_count: usize) -> Element<'_, Message> {
 
 fn library_body<'a>(app: &'a App, filtered: Vec<&'a Photo>) -> Element<'a, Message> {
     row![
-        widgets::date_sidebar::view(app.photos(), app.date_filter(), app.expanded_dates()),
+        widgets::date_sidebar::view(
+            app.photos(),
+            app.date_filter(),
+            app.expanded_dates(),
+            app.rating_filter()
+        ),
         library_grid(app, filtered),
     ]
     .width(Length::Fill)
@@ -235,8 +241,20 @@ fn photo_area(app: &App) -> Element<'_, Message> {
     .align_y(Alignment::Center);
 
     let (pw, ph) = app.preview_dimensions();
+    let crop_overlay = if app.crop_mode() {
+        let params = app.edit_params();
+        Some(CropOverlay {
+            x: params.crop_x,
+            y: params.crop_y,
+            w: params.crop_w,
+            h: params.crop_h,
+            aspect: app.crop_aspect(),
+        })
+    } else {
+        None
+    };
     let content: Element<'_, Message> = if let Some(handle) = app.display_image() {
-        widgets::zoomable_image::view(handle, pw, ph, app.zoom_state())
+        widgets::zoomable_image::view(handle, pw, ph, app.zoom_state(), crop_overlay)
     } else if app.is_loading_photo() {
         empty_viewport(
             "Loading photo",

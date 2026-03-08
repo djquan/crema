@@ -170,10 +170,24 @@ pub struct EditParams {
     pub vibrance: f32,
     #[serde(default)]
     pub saturation: f32,
+    #[serde(default)]
+    pub hsl_hue: f32,
+    #[serde(default)]
+    pub hsl_saturation: f32,
+    #[serde(default)]
+    pub hsl_lightness: f32,
+    #[serde(default)]
+    pub sharpen_amount: f32,
+    #[serde(default = "default_sharpen_radius")]
+    pub sharpen_radius: f32,
     pub crop_x: f32,
     pub crop_y: f32,
     pub crop_w: f32,
     pub crop_h: f32,
+}
+
+fn default_sharpen_radius() -> f32 {
+    1.0
 }
 
 impl Default for EditParams {
@@ -188,6 +202,11 @@ impl Default for EditParams {
             blacks: 0.0,
             vibrance: 0.0,
             saturation: 0.0,
+            hsl_hue: 0.0,
+            hsl_saturation: 0.0,
+            hsl_lightness: 0.0,
+            sharpen_amount: 0.0,
+            sharpen_radius: 1.0,
             crop_x: 0.0,
             crop_y: 0.0,
             crop_w: 1.0,
@@ -319,6 +338,11 @@ mod tests {
             blacks: -5.0,
             vibrance: 15.0,
             saturation: 10.0,
+            hsl_hue: 45.0,
+            hsl_saturation: 20.0,
+            hsl_lightness: -10.0,
+            sharpen_amount: 75.0,
+            sharpen_radius: 2.0,
             crop_x: 0.1,
             crop_y: 0.2,
             crop_w: 0.8,
