@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use iced::widget::{Space, button, column, container, row, scrollable, text};
-use iced::{Element, Length, Padding};
+use iced::{Background, Border, Color, Element, Length, Padding, Theme};
 
 use crema_catalog::models::Photo;
 
@@ -148,7 +148,10 @@ fn month_name(m: u8) -> &'static str {
         .unwrap_or(&"???")
 }
 
-const SIDEBAR_WIDTH: f32 = 200.0;
+const SIDEBAR_WIDTH: f32 = 220.0;
+const BG: Color = Color::from_rgb(0.10, 0.10, 0.11);
+const BORDER: Color = Color::from_rgb(0.20, 0.20, 0.22);
+const MUTED: Color = Color::from_rgb(0.66, 0.66, 0.69);
 
 pub fn view<'a>(
     photos: &[Photo],
@@ -156,7 +159,10 @@ pub fn view<'a>(
     expanded: &HashSet<DateExpansionKey>,
 ) -> Element<'a, Message> {
     let tree = build_date_tree(photos);
-    let mut items: Vec<Element<'a, Message>> = Vec::new();
+    let mut items: Vec<Element<'a, Message>> = vec![
+        text("Browse By Date").size(13).color(MUTED).into(),
+        text(format!("{} photos", tree.total)).size(11).color(MUTED).into(),
+    ];
 
     items.push(filter_button(
         format!("All ({})", tree.total),
@@ -228,7 +234,16 @@ pub fn view<'a>(
         ));
     }
 
-    container(scrollable(column(items).spacing(2).padding(8)).height(Length::Fill))
+    container(scrollable(column(items).spacing(4).padding(10)).height(Length::Fill))
+        .style(|_theme: &Theme| container::Style {
+            background: Some(Background::Color(BG)),
+            border: Border {
+                color: BORDER,
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        })
         .width(SIDEBAR_WIDTH)
         .height(Length::Fill)
         .into()
@@ -241,15 +256,15 @@ fn filter_button<'a>(
     left_pad: u16,
 ) -> Element<'a, Message> {
     let is_active = &filter == active;
-    let btn = button(text(label).size(13))
+    let btn = button(text(label).size(12))
         .on_press(Message::SetDateFilter(filter))
-        .padding(Padding::from([2, 6]))
+        .padding(Padding::from([4, 8]))
         .width(Length::Fill);
 
     let btn = if is_active {
         btn.style(button::primary)
     } else {
-        btn.style(button::text)
+        btn.style(button::secondary)
     };
 
     if left_pad > 0 {
@@ -264,7 +279,7 @@ fn filter_button<'a>(
 fn arrow_button<'a>(label: &str, key: DateExpansionKey) -> Element<'a, Message> {
     button(text(label.to_owned()).size(12))
         .on_press(Message::ToggleDateExpansion(key))
-        .padding(Padding::from([2, 4]))
+        .padding(Padding::from([4, 4]))
         .style(button::text)
         .into()
 }

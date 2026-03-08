@@ -85,13 +85,13 @@ mod tests {
 
     #[test]
     fn gray_pixel_stays_gray() {
-        let buf = ImageBuf::from_data(1, 1, vec![0.5, 0.5, 0.5]).unwrap();
         for sat in [-100.0, -50.0, 50.0, 100.0] {
+            let buf = ImageBuf::from_data(1, 1, vec![0.5, 0.5, 0.5]).unwrap();
             let params = EditParams {
                 saturation: sat,
                 ..Default::default()
             };
-            let result = Saturation.process_cpu(buf.clone(), &params).unwrap();
+            let result = Saturation.process_cpu(buf, &params).unwrap();
             for &v in &result.data {
                 assert!(
                     (v - 0.5).abs() < 1e-6,
@@ -116,13 +116,13 @@ mod tests {
 
     #[test]
     fn extreme_values_no_panic() {
-        let buf = ImageBuf::from_data(2, 2, vec![0.4; 12]).unwrap();
         for sat in [-100.0, 100.0] {
+            let buf = ImageBuf::from_data(2, 2, vec![0.4; 12]).unwrap();
             let params = EditParams {
                 saturation: sat,
                 ..Default::default()
             };
-            let result = Saturation.process_cpu(buf.clone(), &params).unwrap();
+            let result = Saturation.process_cpu(buf, &params).unwrap();
             assert!(result.data.iter().all(|v| v.is_finite()));
         }
     }

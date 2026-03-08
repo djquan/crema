@@ -446,8 +446,8 @@ mod tests {
 
     #[test]
     fn extreme_values_no_panic() {
-        let buf = uniform(0.3, 0.3, 0.3, 4, 4);
         for v in [-100.0_f32, 100.0] {
+            let buf = uniform(0.3, 0.3, 0.3, 4, 4);
             let params = EditParams {
                 contrast: v,
                 highlights: v,
@@ -455,7 +455,7 @@ mod tests {
                 blacks: v,
                 ..Default::default()
             };
-            let result = ToneCurve.process_cpu(buf.clone(), &params).unwrap();
+            let result = ToneCurve.process_cpu(buf, &params).unwrap();
             assert!(result.data.iter().all(|x| x.is_finite()));
         }
     }

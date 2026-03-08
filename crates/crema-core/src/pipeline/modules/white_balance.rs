@@ -326,13 +326,13 @@ mod tests {
 
     #[test]
     fn extreme_temps_no_panic() {
-        let buf = ImageBuf::from_data(1, 1, vec![0.5, 0.5, 0.5]).unwrap();
         for temp in [2000.0_f32, 3000.0, 5500.0, 10000.0, 20000.0] {
+            let buf = ImageBuf::from_data(1, 1, vec![0.5, 0.5, 0.5]).unwrap();
             let params = EditParams {
                 wb_temp: temp,
                 ..Default::default()
             };
-            let result = WhiteBalance.process_cpu(buf.clone(), &params).unwrap();
+            let result = WhiteBalance.process_cpu(buf, &params).unwrap();
             assert!(
                 result.data.iter().all(|v| v.is_finite()),
                 "all values should be finite at {temp}K"
@@ -536,14 +536,14 @@ mod tests {
     #[test]
     fn tint_at_extreme_temp() {
         // Combine extreme tint with extreme temperature; should be finite and positive.
-        let buf = ImageBuf::from_data(1, 1, vec![0.5, 0.5, 0.5]).unwrap();
         for (temp, tint) in [(2000.0_f32, 150.0), (2000.0, -150.0), (20000.0, 150.0)] {
+            let buf = ImageBuf::from_data(1, 1, vec![0.5, 0.5, 0.5]).unwrap();
             let params = EditParams {
                 wb_temp: temp,
                 wb_tint: tint,
                 ..Default::default()
             };
-            let result = WhiteBalance.process_cpu(buf.clone(), &params).unwrap();
+            let result = WhiteBalance.process_cpu(buf, &params).unwrap();
             assert!(
                 result.data.iter().all(|v| v.is_finite() && *v >= 0.0),
                 "extreme temp={temp} tint={tint} should produce finite positive: {:?}",
