@@ -23,7 +23,7 @@ impl std::fmt::Debug for GpuReady {
 }
 
 use crate::views;
-use crate::widgets::date_sidebar::{DateExpansionKey, DateFilter, RatingFilter};
+use crate::widgets::date_sidebar::{DateExpansionKey, DateFilter, RatingFilter, SortOrder};
 use crate::widgets::histogram::HistogramData;
 use crate::widgets::zoomable_image::ZoomState;
 
@@ -114,6 +114,7 @@ pub struct App {
 
     date_filter: DateFilter,
     rating_filter: RatingFilter,
+    sort_order: SortOrder,
     expanded_dates: HashSet<DateExpansionKey>,
     panel_sections: HashSet<PanelSection>,
 }
@@ -185,6 +186,7 @@ pub enum Message {
 
     SetDateFilter(DateFilter),
     SetRatingFilter(RatingFilter),
+    SetSortOrder(SortOrder),
     ToggleDateExpansion(DateExpansionKey),
     TogglePanelSection(PanelSection),
 
@@ -229,6 +231,7 @@ impl App {
 
             date_filter: DateFilter::All,
             rating_filter: RatingFilter::All,
+            sort_order: SortOrder::default(),
             expanded_dates: HashSet::new(),
             panel_sections: HashSet::from([
                 PanelSection::Histogram,
@@ -506,6 +509,10 @@ impl App {
             }
             Message::SetRatingFilter(filter) => {
                 self.rating_filter = filter;
+                Task::none()
+            }
+            Message::SetSortOrder(order) => {
+                self.sort_order = order;
                 Task::none()
             }
             Message::ToggleDateExpansion(key) => {
@@ -1322,14 +1329,21 @@ impl App {
     }
 
     pub fn filtered_photos(&self) -> Vec<&Photo> {
-        self.photos
+        let mut photos: Vec<&Photo> = self
+            .photos
             .iter()
             .filter(|photo| self.date_filter.matches(photo) && self.rating_filter.matches(photo))
-            .collect()
+            .collect();
+        self.sort_order.sort(&mut photos);
+        photos
     }
 
     pub fn rating_filter(&self) -> RatingFilter {
         self.rating_filter
+    }
+
+    pub fn sort_order(&self) -> SortOrder {
+        self.sort_order
     }
 
     pub fn workspace(&self) -> Workspace {

@@ -112,7 +112,8 @@ fn library_body<'a>(app: &'a App, filtered: Vec<&'a Photo>) -> Element<'a, Messa
             app.photos(),
             app.date_filter(),
             app.expanded_dates(),
-            app.rating_filter()
+            app.rating_filter(),
+            app.sort_order()
         ),
         library_grid(app, filtered),
     ]

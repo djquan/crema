@@ -23,6 +23,60 @@ pub enum RatingFilter {
     AtLeast(i32),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortOrder {
+    #[default]
+    DateDesc,
+    DateAsc,
+    Name,
+    RatingDesc,
+    FileSize,
+}
+
+impl SortOrder {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SortOrder::DateDesc => "Date ↓",
+            SortOrder::DateAsc => "Date ↑",
+            SortOrder::Name => "Name",
+            SortOrder::RatingDesc => "Rating",
+            SortOrder::FileSize => "Size",
+        }
+    }
+
+    pub fn sort(&self, photos: &mut Vec<&Photo>) {
+        match self {
+            SortOrder::DateDesc => {
+                photos.sort_by(|a, b| b.date_taken.cmp(&a.date_taken).then(b.id.cmp(&a.id)));
+            }
+            SortOrder::DateAsc => {
+                photos.sort_by(|a, b| {
+                    let a_date = a.date_taken.as_deref().unwrap_or("");
+                    let b_date = b.date_taken.as_deref().unwrap_or("");
+                    a_date.cmp(b_date).then(a.id.cmp(&b.id))
+                });
+            }
+            SortOrder::Name => {
+                photos.sort_by(|a, b| {
+                    let a_name = std::path::Path::new(&a.file_path)
+                        .file_name()
+                        .unwrap_or_default();
+                    let b_name = std::path::Path::new(&b.file_path)
+                        .file_name()
+                        .unwrap_or_default();
+                    a_name.cmp(b_name)
+                });
+            }
+            SortOrder::RatingDesc => {
+                photos.sort_by(|a, b| b.rating.cmp(&a.rating).then(b.id.cmp(&a.id)));
+            }
+            SortOrder::FileSize => {
+                photos.sort_by(|a, b| b.file_size.cmp(&a.file_size));
+            }
+        }
+    }
+}
+
 impl RatingFilter {
     pub fn matches(&self, photo: &Photo) -> bool {
         match self {
@@ -175,6 +229,7 @@ pub fn view<'a>(
     active_filter: &DateFilter,
     expanded: &HashSet<DateExpansionKey>,
     rating_filter: RatingFilter,
+    sort_order: SortOrder,
 ) -> Element<'a, Message> {
     let tree = build_date_tree(photos);
     let mut items: Vec<Element<'a, Message>> = vec![
@@ -259,6 +314,10 @@ pub fn view<'a>(
     items.push(text("Filter By Rating").size(13).color(MUTED).into());
     items.push(rating_filter_row(rating_filter));
 
+    items.push(Space::new().height(8).into());
+    items.push(text("Sort By").size(13).color(MUTED).into());
+    items.push(sort_order_row(sort_order));
+
     container(scrollable(column(items).spacing(4).padding(10)).height(Length::Fill))
         .style(|_theme: &Theme| container::Style {
             background: Some(Background::Color(BG)),
@@ -302,6 +361,34 @@ fn rating_filter_row(active: RatingFilter) -> Element<'static, Message> {
     }
 
     items.into()
+}
+
+fn sort_order_row(active: SortOrder) -> Element<'static, Message> {
+    let options = [
+        SortOrder::DateDesc,
+        SortOrder::DateAsc,
+        SortOrder::Name,
+        SortOrder::RatingDesc,
+        SortOrder::FileSize,
+    ];
+
+    let mut items = row![].spacing(2);
+    for order in options {
+        let is_active = order == active;
+        let label_color = if is_active { ACCENT } else { MUTED };
+        items = items.push(
+            button(text(order.label()).size(10).color(label_color))
+                .on_press(Message::SetSortOrder(order))
+                .padding(Padding::from([3, 4]))
+                .style(if is_active {
+                    button::primary
+                } else {
+                    button::text
+                }),
+        );
+    }
+
+    column![items].into()
 }
 
 fn filter_button<'a>(
@@ -480,6 +567,96 @@ mod tests {
         let photo = make_photo(1, Some("2026-02-05 10:00:00"));
         assert!(RatingFilter::All.matches(&photo));
         assert!(!RatingFilter::AtLeast(1).matches(&photo));
+    }
+
+    #[test]
+    fn sort_date_desc_is_default() {
+        let photos = vec![
+            make_photo(1, Some("2025-01-01 10:00:00")),
+            make_photo(2, Some("2026-06-15 12:00:00")),
+            make_photo(3, Some("2026-01-01 08:00:00")),
+        ];
+        let mut refs: Vec<&Photo> = photos.iter().collect();
+        SortOrder::DateDesc.sort(&mut refs);
+        assert_eq!(refs[0].id, 2);
+        assert_eq!(refs[1].id, 3);
+        assert_eq!(refs[2].id, 1);
+    }
+
+    #[test]
+    fn sort_date_asc() {
+        let photos = vec![
+            make_photo(1, Some("2026-06-15 12:00:00")),
+            make_photo(2, Some("2025-01-01 10:00:00")),
+            make_photo(3, Some("2026-01-01 08:00:00")),
+        ];
+        let mut refs: Vec<&Photo> = photos.iter().collect();
+        SortOrder::DateAsc.sort(&mut refs);
+        assert_eq!(refs[0].id, 2);
+        assert_eq!(refs[1].id, 3);
+        assert_eq!(refs[2].id, 1);
+    }
+
+    #[test]
+    fn sort_by_name() {
+        let mut p1 = make_photo(1, None);
+        p1.file_path = "/photos/banana.jpg".into();
+        let mut p2 = make_photo(2, None);
+        p2.file_path = "/photos/apple.jpg".into();
+        let mut p3 = make_photo(3, None);
+        p3.file_path = "/photos/cherry.jpg".into();
+        let photos = vec![p1, p2, p3];
+        let mut refs: Vec<&Photo> = photos.iter().collect();
+        SortOrder::Name.sort(&mut refs);
+        assert_eq!(refs[0].id, 2); // apple
+        assert_eq!(refs[1].id, 1); // banana
+        assert_eq!(refs[2].id, 3); // cherry
+    }
+
+    #[test]
+    fn sort_by_rating() {
+        let mut p1 = make_photo(1, None);
+        p1.rating = 3;
+        let mut p2 = make_photo(2, None);
+        p2.rating = 5;
+        let mut p3 = make_photo(3, None);
+        p3.rating = 1;
+        let photos = vec![p1, p2, p3];
+        let mut refs: Vec<&Photo> = photos.iter().collect();
+        SortOrder::RatingDesc.sort(&mut refs);
+        assert_eq!(refs[0].id, 2); // 5 stars
+        assert_eq!(refs[1].id, 1); // 3 stars
+        assert_eq!(refs[2].id, 3); // 1 star
+    }
+
+    #[test]
+    fn sort_by_file_size() {
+        let mut p1 = make_photo(1, None);
+        p1.file_size = 500;
+        let mut p2 = make_photo(2, None);
+        p2.file_size = 2000;
+        let mut p3 = make_photo(3, None);
+        p3.file_size = 100;
+        let photos = vec![p1, p2, p3];
+        let mut refs: Vec<&Photo> = photos.iter().collect();
+        SortOrder::FileSize.sort(&mut refs);
+        assert_eq!(refs[0].id, 2); // 2000
+        assert_eq!(refs[1].id, 1); // 500
+        assert_eq!(refs[2].id, 3); // 100
+    }
+
+    #[test]
+    fn sort_date_asc_nulls_first() {
+        let photos = vec![
+            make_photo(1, Some("2026-01-01 10:00:00")),
+            make_photo(2, None),
+            make_photo(3, Some("2025-06-01 12:00:00")),
+        ];
+        let mut refs: Vec<&Photo> = photos.iter().collect();
+        SortOrder::DateAsc.sort(&mut refs);
+        assert_eq!(refs[0].id, 2); // None sorts first (empty string)
+        assert_eq!(refs[1].id, 3);
+        assert_eq!(refs[2].id, 1);
     }
 
     #[test]
