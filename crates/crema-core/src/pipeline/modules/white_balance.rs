@@ -21,9 +21,36 @@ impl ProcessingModule for WhiteBalance {
             let r = pixel[0];
             let g = pixel[1];
             let b = pixel[2];
-            pixel[0] = (matrix[0] * r + matrix[1] * g + matrix[2] * b).max(0.0);
-            pixel[1] = (matrix[3] * r + matrix[4] * g + matrix[5] * b).max(0.0);
-            pixel[2] = (matrix[6] * r + matrix[7] * g + matrix[8] * b).max(0.0);
+            let out_r = matrix[0] * r + matrix[1] * g + matrix[2] * b;
+            let out_g = matrix[3] * r + matrix[4] * g + matrix[5] * b;
+            let out_b = matrix[6] * r + matrix[7] * g + matrix[8] * b;
+
+            let min_ch = out_r.min(out_g).min(out_b);
+            if min_ch >= 0.0 {
+                pixel[0] = out_r;
+                pixel[1] = out_g;
+                pixel[2] = out_b;
+            } else {
+                // Desaturate toward luminance axis to bring negatives to zero.
+                // This preserves hue (direction from neutral) unlike hard clipping.
+                let y = 0.2126 * out_r + 0.7152 * out_g + 0.0722 * out_b;
+                if y <= 0.0 {
+                    pixel[0] = 0.0;
+                    pixel[1] = 0.0;
+                    pixel[2] = 0.0;
+                } else {
+                    // Find t in [0,1] where y + t*(ch - y) = 0 for the most-negative channel.
+                    let mut t = 1.0_f32;
+                    for &ch in &[out_r, out_g, out_b] {
+                        if ch < 0.0 {
+                            t = t.min(y / (y - ch));
+                        }
+                    }
+                    pixel[0] = (y + t * (out_r - y)).max(0.0);
+                    pixel[1] = (y + t * (out_g - y)).max(0.0);
+                    pixel[2] = (y + t * (out_b - y)).max(0.0);
+                }
+            }
         }
 
         Ok(input)
@@ -645,6 +672,69 @@ mod tests {
                 recovered[i],
                 adapted[i]
             );
+        }
+    }
+
+    #[test]
+    fn gamut_clipping_preserves_hue() {
+        // Push a saturated blue pixel through an extreme warm WB shift.
+        // The old hard-clip (.max(0.0)) would zero out the negative channel,
+        // shifting hue. Desaturation toward luminance should keep the hue intact.
+        let pixel = [0.01_f32, 0.05, 0.9];
+        let buf = ImageBuf::from_data(1, 1, pixel.to_vec()).unwrap();
+        let params = EditParams {
+            wb_temp: 15000.0,
+            ..Default::default()
+        };
+        let result = WhiteBalance.process_cpu(buf, &params).unwrap();
+        let r = result.data[0];
+        let g = result.data[1];
+        let b = result.data[2];
+
+        assert!(
+            r >= 0.0 && g >= 0.0 && b >= 0.0,
+            "all channels non-negative"
+        );
+        assert!(
+            r.is_finite() && g.is_finite() && b.is_finite(),
+            "all channels finite"
+        );
+
+        // Blue should still dominate (hue preserved)
+        assert!(
+            b >= r && b >= g,
+            "blue pixel should stay blue-ish after warm WB: r={r} g={g} b={b}"
+        );
+    }
+
+    #[test]
+    fn desaturation_clamp_no_negative_output() {
+        // Sweep extreme temperatures with saturated colors to ensure
+        // no negative outputs regardless of input.
+        let saturated_pixels = [
+            [0.9, 0.01, 0.01], // red
+            [0.01, 0.9, 0.01], // green
+            [0.01, 0.01, 0.9], // blue
+            [0.9, 0.9, 0.01],  // yellow
+            [0.01, 0.9, 0.9],  // cyan
+            [0.9, 0.01, 0.9],  // magenta
+        ];
+        for temp in [2000.0_f32, 3000.0, 10000.0, 20000.0] {
+            for pixel in &saturated_pixels {
+                let buf = ImageBuf::from_data(1, 1, pixel.to_vec()).unwrap();
+                let params = EditParams {
+                    wb_temp: temp,
+                    wb_tint: 50.0,
+                    ..Default::default()
+                };
+                let result = WhiteBalance.process_cpu(buf, &params).unwrap();
+                for (i, &v) in result.data.iter().enumerate() {
+                    assert!(
+                        v >= 0.0 && v.is_finite(),
+                        "negative at {temp}K pixel={pixel:?} ch{i}={v}"
+                    );
+                }
+            }
         }
     }
 
