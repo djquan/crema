@@ -16,6 +16,16 @@ RUST_LOG=debug cargo run         # launch with verbose logging
 
 Linux requires: `sudo apt-get install libwayland-dev libxkbcommon-dev libgtk-3-dev libxdo-dev`
 
+## Pre-Commit Checklist
+
+Before every commit, run all three and confirm they pass:
+
+```bash
+cargo fmt --all                          # format
+cargo clippy --workspace -- -D warnings  # lint (must be zero warnings)
+cargo test --workspace                   # tests
+```
+
 ## Architecture
 
 Crema is a GPU-accelerated photo editor structured as a Cargo workspace with five library crates and one binary crate.
