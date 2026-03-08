@@ -53,10 +53,21 @@ fn toolbar(app: &App, filtered_count: usize) -> Element<'_, Message> {
         .padding([8, 14])
         .style(primary_action);
 
-    let export_btn = button("Export")
-        .on_press_maybe(app.can_export().then_some(Message::Export))
-        .padding([8, 14])
-        .style(secondary_action);
+    let multi_count = app.selected_photos().len();
+    let export_btn: Element<'_, Message> =
+        if app.workspace() == Workspace::Library && multi_count > 0 {
+            button(text(format!("Export {} Photos", multi_count)))
+                .on_press(Message::BatchExport)
+                .padding([8, 14])
+                .style(primary_action)
+                .into()
+        } else {
+            button("Export")
+                .on_press_maybe(app.can_export().then_some(Message::Export))
+                .padding([8, 14])
+                .style(secondary_action)
+                .into()
+        };
 
     let panel_btn = button(if app.right_panel_open() {
         "Hide Panels"
@@ -163,6 +174,7 @@ fn library_grid<'a>(app: &'a App, filtered: Vec<&'a Photo>) -> Element<'a, Messa
                 filtered,
                 app.thumbnails(),
                 app.selected_photo(),
+                app.selected_photos(),
             ))
             .height(Length::Fill)
             .width(Length::Fill),

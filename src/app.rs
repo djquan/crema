@@ -88,6 +88,7 @@ pub struct App {
     menu: Option<crate::menu::AppMenu>,
     workspace: Workspace,
     selected_photo: Option<PhotoId>,
+    selected_photos: HashSet<PhotoId>,
     loaded_photo: Option<PhotoId>,
     right_panel_open: bool,
     catalog: Option<Catalog>,
@@ -123,6 +124,7 @@ pub struct App {
     is_processing: bool,
 
     gpu: Option<GpuHandle>,
+    modifiers: iced::keyboard::Modifiers,
 
     date_filter: DateFilter,
     rating_filter: RatingFilter,
@@ -204,11 +206,17 @@ pub enum Message {
     ExportPathSelected(PathBuf),
     ExportComplete(String),
 
+    BatchExport,
+    BatchExportFolderSelected(PathBuf),
+    BatchExportComplete(usize, usize),
+
     SetDateFilter(DateFilter),
     SetRatingFilter(RatingFilter),
     SetSortOrder(SortOrder),
     ToggleDateExpansion(DateExpansionKey),
     TogglePanelSection(PanelSection),
+
+    ModifiersChanged(iced::keyboard::Modifiers),
 
     Noop,
 }
@@ -219,6 +227,7 @@ impl App {
             menu: None,
             workspace: Workspace::Library,
             selected_photo: None,
+            selected_photos: HashSet::new(),
             loaded_photo: None,
             right_panel_open: true,
             catalog: None,
@@ -248,6 +257,7 @@ impl App {
             is_loading_photo: false,
             is_processing: false,
             gpu: None,
+            modifiers: iced::keyboard::Modifiers::default(),
 
             date_filter: DateFilter::All,
             rating_filter: RatingFilter::All,
@@ -346,6 +356,13 @@ impl App {
             Message::Export => self.handle_export(),
             Message::ExportPathSelected(path) => self.handle_export_path_selected(path),
             Message::ExportComplete(msg) => self.handle_export_complete(msg),
+            Message::BatchExport => self.handle_batch_export(),
+            Message::BatchExportFolderSelected(folder) => {
+                self.handle_batch_export_folder_selected(folder)
+            }
+            Message::BatchExportComplete(success, total) => {
+                self.handle_batch_export_complete(success, total)
+            }
             Message::ExposureChanged(v) => {
                 self.snapshot_for_undo();
                 self.edit_params.exposure = v;
@@ -594,6 +611,10 @@ impl App {
                 }
                 Task::none()
             }
+            Message::ModifiersChanged(mods) => {
+                self.modifiers = mods;
+                Task::none()
+            }
             Message::Noop => Task::none(),
         }
     }
@@ -699,7 +720,15 @@ impl App {
     }
 
     fn handle_select_photo(&mut self, id: PhotoId) -> Task<Message> {
+        if self.modifiers.command() {
+            return self.handle_toggle_photo_selection(id);
+        }
+        if self.modifiers.shift() {
+            return self.handle_select_photo_range(id);
+        }
+
         self.selected_photo = Some(id);
+        self.selected_photos.clear();
         self.update_export_enabled();
 
         if let Some(photo) = self.photos.iter().find(|photo| photo.id == id) {
@@ -916,6 +945,113 @@ impl App {
         Task::none()
     }
 
+    fn handle_toggle_photo_selection(&mut self, id: PhotoId) -> Task<Message> {
+        if self.selected_photos.contains(&id) {
+            self.selected_photos.remove(&id);
+        } else {
+            self.selected_photos.insert(id);
+        }
+        self.selected_photo = Some(id);
+        self.update_export_enabled();
+        Task::none()
+    }
+
+    fn handle_select_photo_range(&mut self, id: PhotoId) -> Task<Message> {
+        let filtered: Vec<PhotoId> = self.filtered_photos().iter().map(|p| p.id).collect();
+
+        let anchor = self.selected_photo.unwrap_or(id);
+        let anchor_idx = filtered.iter().position(|&pid| pid == anchor);
+        let target_idx = filtered.iter().position(|&pid| pid == id);
+
+        if let (Some(start), Some(end)) = (anchor_idx, target_idx) {
+            let lo = start.min(end);
+            let hi = start.max(end);
+            for &pid in &filtered[lo..=hi] {
+                self.selected_photos.insert(pid);
+            }
+        }
+
+        self.selected_photo = Some(id);
+        self.update_export_enabled();
+        Task::none()
+    }
+
+    fn handle_batch_export(&self) -> Task<Message> {
+        Task::perform(
+            async {
+                let dialog = rfd::AsyncFileDialog::new().set_title("Choose export folder");
+                dialog.pick_folder().await.map(|h| h.path().to_path_buf())
+            },
+            |result| match result {
+                Some(folder) => Message::BatchExportFolderSelected(folder),
+                None => Message::Noop,
+            },
+        )
+    }
+
+    fn handle_batch_export_folder_selected(&mut self, folder: PathBuf) -> Task<Message> {
+        let ids: Vec<PhotoId> = self.selected_photos.iter().copied().collect();
+        if ids.is_empty() {
+            return Task::none();
+        }
+
+        let photo_data: Vec<(String, EditParams)> = ids
+            .iter()
+            .filter_map(|&id| {
+                let photo = self.photos.iter().find(|p| p.id == id)?;
+                let params = self
+                    .catalog
+                    .as_ref()
+                    .and_then(|cat| cat.get_edits(id).ok().flatten())
+                    .map(|e| e.to_edit_params())
+                    .unwrap_or_default();
+                Some((photo.file_path.clone(), params))
+            })
+            .collect();
+
+        let total = photo_data.len();
+        self.is_exporting = true;
+        self.status_message = format!("Exporting 0/{total}...");
+
+        Task::perform(
+            async move {
+                let mut success_count = 0usize;
+                for (file_path, params) in &photo_data {
+                    let path = std::path::Path::new(file_path);
+                    let stem = path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let output_path = folder.join(format!("{stem}.jpg"));
+
+                    let buf = match crema_core::raw::load_any(path) {
+                        Ok(buf) => buf,
+                        Err(e) => {
+                            error!("Failed to load {}: {e}", file_path);
+                            continue;
+                        }
+                    };
+
+                    let result = export_image(buf, params, &output_path);
+                    if result.starts_with("Exported") {
+                        success_count += 1;
+                    } else {
+                        error!("{result}");
+                    }
+                }
+                (success_count, total)
+            },
+            |(success, total)| Message::BatchExportComplete(success, total),
+        )
+    }
+
+    fn handle_batch_export_complete(&mut self, success: usize, total: usize) -> Task<Message> {
+        self.is_exporting = false;
+        self.status_message = format!("Exported {success}/{total} photos.");
+        Task::none()
+    }
+
     fn handle_auto_enhance(&self) -> Task<Message> {
         let Some(ref preview) = self.preview_image else {
             return Task::none();
@@ -932,9 +1068,14 @@ impl App {
             crate::menu::subscription(),
             iced::keyboard::listen().map(|event| match event {
                 iced::keyboard::Event::KeyPressed { key, modifiers, .. } => {
-                    handle_key_press(key, modifiers).unwrap_or(Message::Noop)
+                    handle_key_press(key, modifiers).unwrap_or(Message::ModifiersChanged(modifiers))
                 }
-                _ => Message::Noop,
+                iced::keyboard::Event::KeyReleased { modifiers, .. } => {
+                    Message::ModifiersChanged(modifiers)
+                }
+                iced::keyboard::Event::ModifiersChanged(modifiers) => {
+                    Message::ModifiersChanged(modifiers)
+                }
             }),
         ])
     }
@@ -1447,6 +1588,10 @@ impl App {
 
     pub fn selected_photo(&self) -> Option<PhotoId> {
         self.selected_photo
+    }
+
+    pub fn selected_photos(&self) -> &HashSet<PhotoId> {
+        &self.selected_photos
     }
 
     pub fn right_panel_open(&self) -> bool {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use iced::widget::{Space, button, column, container, image, responsive, row, text};
 use iced::{Background, Border, Color, Element, Length, Shadow, Theme};
@@ -13,14 +13,17 @@ const MAX_WIDTH: f32 = 240.0;
 const CARD_BG: Color = Color::from_rgb(0.11, 0.11, 0.12);
 const CARD_HOVER: Color = Color::from_rgb(0.14, 0.14, 0.16);
 const CARD_SELECTED: Color = Color::from_rgb(0.16, 0.20, 0.28);
+const CARD_MULTI_SELECTED: Color = Color::from_rgb(0.13, 0.17, 0.24);
 const BORDER: Color = Color::from_rgb(0.20, 0.20, 0.22);
 const ACCENT: Color = Color::from_rgb(0.26, 0.52, 0.94);
+const MULTI_ACCENT: Color = Color::from_rgb(0.20, 0.42, 0.78);
 const MUTED: Color = Color::from_rgb(0.66, 0.66, 0.69);
 
 pub fn view<'a>(
     photos: Vec<&'a Photo>,
     thumbnails: &'a HashMap<PhotoId, iced::widget::image::Handle>,
     selected: Option<PhotoId>,
+    multi_selected: &'a HashSet<PhotoId>,
 ) -> Element<'a, Message> {
     if photos.is_empty() {
         return container(
@@ -50,6 +53,7 @@ pub fn view<'a>(
                 photo,
                 thumbnails.get(&photo.id),
                 selected,
+                multi_selected,
                 cell_width,
             ));
 
@@ -74,9 +78,12 @@ fn photo_cell<'a>(
     photo: &'a Photo,
     thumbnail: Option<&'a iced::widget::image::Handle>,
     selected: Option<PhotoId>,
+    multi_selected: &HashSet<PhotoId>,
     width: f32,
 ) -> Element<'a, Message> {
-    let is_selected = selected == Some(photo.id);
+    let is_primary = selected == Some(photo.id);
+    let is_multi = multi_selected.contains(&photo.id);
+    let is_selected = is_primary && !is_multi;
     let filename = std::path::Path::new(&photo.file_path)
         .file_name()
         .unwrap_or_default()
@@ -126,19 +133,29 @@ fn photo_cell<'a>(
         info_row = info_row.push(text(rating_label).size(11).color(ACCENT));
     }
 
+    let highlight = is_selected || is_multi;
+
     let mut card = column![
         button(thumb_content)
             .on_press(Message::SelectPhoto(photo.id))
             .padding(0)
             .width(width)
-            .style(move |_theme: &Theme, status| thumb_button_style(status, is_selected)),
+            .style(move |_theme: &Theme, status| thumb_button_style(status, highlight)),
         text(filename).size(12),
         info_row,
     ]
     .spacing(6)
     .width(width);
 
-    if is_selected {
+    if is_multi {
+        card = card.push(
+            row![
+                text("\u{2713} Selected").size(11).color(MULTI_ACCENT),
+                Space::new().width(Length::Fill),
+            ]
+            .align_y(iced::Alignment::Center),
+        );
+    } else if is_selected {
         card = card.push(
             row![
                 text("Selected").size(11).color(ACCENT),
@@ -152,17 +169,31 @@ fn photo_cell<'a>(
         );
     }
 
+    let bg_color = if is_selected {
+        CARD_SELECTED
+    } else if is_multi {
+        CARD_MULTI_SELECTED
+    } else {
+        CARD_BG
+    };
+
+    let border_color = if is_selected {
+        ACCENT
+    } else if is_multi {
+        MULTI_ACCENT
+    } else {
+        BORDER
+    };
+
+    let border_width = if is_multi { 2.0 } else { 1.0 };
+
     container(card)
         .padding(10)
         .style(move |_theme: &Theme| container::Style {
-            background: Some(Background::Color(if is_selected {
-                CARD_SELECTED
-            } else {
-                CARD_BG
-            })),
+            background: Some(Background::Color(bg_color)),
             border: Border {
-                color: if is_selected { ACCENT } else { BORDER },
-                width: 1.0,
+                color: border_color,
+                width: border_width,
                 radius: 8.0.into(),
             },
             ..Default::default()
