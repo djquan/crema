@@ -168,3 +168,285 @@ pub fn import_file(catalog: &Catalog, path: &Path) -> Result<Option<PhotoId>> {
 
     catalog.insert_photo(&insert)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn create_minimal_jpeg(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        let mut f = fs::File::create(&path).unwrap();
+        // Minimal valid JPEG: SOI + content bytes + EOI
+        f.write_all(&[0xFF, 0xD8]).unwrap();
+        f.write_all(content).unwrap();
+        f.write_all(&[0xFF, 0xD9]).unwrap();
+        f.flush().unwrap();
+        path
+    }
+
+    fn create_file(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn import_file_creates_photo_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpeg_path = create_minimal_jpeg(dir.path(), "photo.jpg", b"test data");
+        let catalog = Catalog::open_in_memory().unwrap();
+
+        let id = import_file(&catalog, &jpeg_path).unwrap();
+        assert!(id.is_some(), "should return Some(id) for new import");
+
+        let photo = catalog.get_photo(id.unwrap()).unwrap().unwrap();
+        assert!(photo.file_path.ends_with("photo.jpg"));
+        assert!(!photo.file_hash.is_empty());
+        assert!(photo.file_size > 0);
+    }
+
+    #[test]
+    fn import_file_duplicate_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpeg_path = create_minimal_jpeg(dir.path(), "dup.jpg", b"same content");
+        let catalog = Catalog::open_in_memory().unwrap();
+
+        let first = import_file(&catalog, &jpeg_path).unwrap();
+        assert!(first.is_some());
+
+        let second = import_file(&catalog, &jpeg_path).unwrap();
+        assert!(second.is_none(), "duplicate path should return None");
+
+        assert_eq!(catalog.photo_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn import_file_nonexistent_path_errors() {
+        let catalog = Catalog::open_in_memory().unwrap();
+        let result = import_file(&catalog, Path::new("/does/not/exist.jpg"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn import_file_computes_blake3_hash_correctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"\xFF\xD8test payload\xFF\xD9";
+        let path = create_file(dir.path(), "hashed.jpg", content);
+        let catalog = Catalog::open_in_memory().unwrap();
+
+        let id = import_file(&catalog, &path).unwrap().unwrap();
+        let photo = catalog.get_photo(id).unwrap().unwrap();
+
+        let expected_hash = blake3::hash(content).to_hex().to_string();
+        assert_eq!(photo.file_hash, expected_hash);
+    }
+
+    #[test]
+    fn import_file_hash_is_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"\xFF\xD8deterministic\xFF\xD9";
+        let path1 = create_file(dir.path(), "a.jpg", content);
+        let path2 = create_file(dir.path(), "b.jpg", content);
+        let catalog = Catalog::open_in_memory().unwrap();
+
+        let id1 = import_file(&catalog, &path1).unwrap().unwrap();
+        let id2 = import_file(&catalog, &path2).unwrap().unwrap();
+
+        let photo1 = catalog.get_photo(id1).unwrap().unwrap();
+        let photo2 = catalog.get_photo(id2).unwrap().unwrap();
+
+        assert_eq!(photo1.file_hash, photo2.file_hash);
+    }
+
+    #[test]
+    fn import_file_stores_file_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = vec![0u8; 1000];
+        let path = create_file(dir.path(), "sized.jpg", &payload);
+        let catalog = Catalog::open_in_memory().unwrap();
+
+        let id = import_file(&catalog, &path).unwrap().unwrap();
+        let photo = catalog.get_photo(id).unwrap().unwrap();
+        assert_eq!(photo.file_size, 1000);
+    }
+
+    #[test]
+    fn import_file_uses_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        create_minimal_jpeg(dir.path(), "canonical.jpg", b"data");
+        let catalog = Catalog::open_in_memory().unwrap();
+
+        // Use a relative-style path that canonicalize will resolve
+        let path = dir.path().join("./canonical.jpg");
+        let id = import_file(&catalog, &path).unwrap().unwrap();
+        let photo = catalog.get_photo(id).unwrap().unwrap();
+        let stored = PathBuf::from(&photo.file_path);
+        let expected = path.canonicalize().unwrap();
+
+        assert!(stored.is_absolute());
+        assert_eq!(stored, expected);
+    }
+
+    #[test]
+    fn import_folder_imports_supported_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        create_minimal_jpeg(dir.path(), "a.jpg", b"aaa");
+        create_minimal_jpeg(dir.path(), "b.jpeg", b"bbb");
+        create_minimal_jpeg(dir.path(), "c.png", b"ccc");
+        create_file(dir.path(), "readme.txt", b"not an image");
+        create_file(dir.path(), "notes.md", b"also not an image");
+
+        let catalog = Catalog::open_in_memory().unwrap();
+        let result = import_folder(&catalog, dir.path()).unwrap();
+
+        assert_eq!(result.imported.len(), 3);
+        assert_eq!(result.skipped, 0);
+        assert!(result.errors.is_empty());
+        assert_eq!(catalog.photo_count().unwrap(), 3);
+    }
+
+    #[test]
+    fn import_folder_skips_unsupported_files() {
+        let dir = tempfile::tempdir().unwrap();
+        create_file(dir.path(), "doc.pdf", b"pdf content");
+        create_file(dir.path(), "data.csv", b"csv content");
+
+        let catalog = Catalog::open_in_memory().unwrap();
+        let result = import_folder(&catalog, dir.path()).unwrap();
+
+        assert_eq!(result.imported.len(), 0);
+        assert_eq!(catalog.photo_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn import_folder_skips_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        create_minimal_jpeg(dir.path(), "top.jpg", b"top");
+        let subdir = dir.path().join("subdir");
+        fs::create_dir(&subdir).unwrap();
+        create_minimal_jpeg(&subdir, "nested.jpg", b"nested");
+
+        let catalog = Catalog::open_in_memory().unwrap();
+        let result = import_folder(&catalog, dir.path()).unwrap();
+
+        // Only top-level files should be imported
+        assert_eq!(result.imported.len(), 1);
+    }
+
+    #[test]
+    fn import_folder_nonexistent_errors() {
+        let catalog = Catalog::open_in_memory().unwrap();
+        let result = import_folder(&catalog, Path::new("/nonexistent/dir"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn import_folder_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = Catalog::open_in_memory().unwrap();
+        let result = import_folder(&catalog, dir.path()).unwrap();
+
+        assert_eq!(result.imported.len(), 0);
+        assert_eq!(result.skipped, 0);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn import_folder_handles_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        create_minimal_jpeg(dir.path(), "photo.jpg", b"data");
+
+        let catalog = Catalog::open_in_memory().unwrap();
+
+        let r1 = import_folder(&catalog, dir.path()).unwrap();
+        assert_eq!(r1.imported.len(), 1);
+
+        let r2 = import_folder(&catalog, dir.path()).unwrap();
+        assert_eq!(r2.imported.len(), 0);
+        assert_eq!(r2.skipped, 1);
+
+        assert_eq!(catalog.photo_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn import_paths_mixed_files_and_directories() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // A directory with images
+        let subdir = dir.path().join("photos");
+        fs::create_dir(&subdir).unwrap();
+        create_minimal_jpeg(&subdir, "from_dir.jpg", b"dir_img");
+
+        // A standalone file
+        let standalone = create_minimal_jpeg(dir.path(), "standalone.png", b"standalone");
+
+        let catalog = Catalog::open_in_memory().unwrap();
+        let paths = vec![subdir.clone(), standalone];
+        let result = import_paths(&catalog, &paths).unwrap();
+
+        assert_eq!(result.imported.len(), 2);
+        assert_eq!(catalog.photo_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn import_paths_skips_unsupported_standalone_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let txt = create_file(dir.path(), "notes.txt", b"text");
+        let jpg = create_minimal_jpeg(dir.path(), "real.jpg", b"image");
+
+        let catalog = Catalog::open_in_memory().unwrap();
+        let result = import_paths(&catalog, &[txt, jpg]).unwrap();
+
+        assert_eq!(result.imported.len(), 1);
+    }
+
+    #[test]
+    fn import_paths_empty_list() {
+        let catalog = Catalog::open_in_memory().unwrap();
+        let result = import_paths(&catalog, &[]).unwrap();
+
+        assert_eq!(result.imported.len(), 0);
+        assert_eq!(result.skipped, 0);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn import_file_no_exif_still_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        // A minimal JPEG with no EXIF data
+        let path = create_minimal_jpeg(dir.path(), "no_exif.jpg", b"plain jpeg content");
+        let catalog = Catalog::open_in_memory().unwrap();
+
+        let id = import_file(&catalog, &path).unwrap().unwrap();
+        let photo = catalog.get_photo(id).unwrap().unwrap();
+
+        // EXIF fields should be None since there's no valid EXIF
+        assert!(photo.camera_make.is_none());
+        assert!(photo.camera_model.is_none());
+        assert!(photo.focal_length.is_none());
+        assert!(photo.iso.is_none());
+    }
+
+    #[test]
+    fn import_result_accumulates_across_import_paths() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let dir_a = dir.path().join("a");
+        let dir_b = dir.path().join("b");
+        fs::create_dir(&dir_a).unwrap();
+        fs::create_dir(&dir_b).unwrap();
+
+        create_minimal_jpeg(&dir_a, "1.jpg", b"one");
+        create_minimal_jpeg(&dir_a, "2.jpg", b"two");
+        create_minimal_jpeg(&dir_b, "3.jpg", b"three");
+
+        let standalone = create_minimal_jpeg(dir.path(), "4.png", b"four");
+
+        let catalog = Catalog::open_in_memory().unwrap();
+        let result = import_paths(&catalog, &[dir_a, dir_b, standalone]).unwrap();
+
+        assert_eq!(result.imported.len(), 4);
+        assert_eq!(catalog.photo_count().unwrap(), 4);
+    }
+}

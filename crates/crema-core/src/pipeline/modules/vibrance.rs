@@ -201,13 +201,13 @@ mod tests {
 
     #[test]
     fn extreme_values_no_panic() {
-        let buf = ImageBuf::from_data(2, 2, vec![0.4; 12]).unwrap();
         for vib in [-100.0, 100.0] {
+            let buf = ImageBuf::from_data(2, 2, vec![0.4; 12]).unwrap();
             let params = EditParams {
                 vibrance: vib,
                 ..Default::default()
             };
-            let result = Vibrance.process_cpu(buf.clone(), &params).unwrap();
+            let result = Vibrance.process_cpu(buf, &params).unwrap();
             assert!(result.data.iter().all(|v| v.is_finite()));
         }
     }
@@ -253,8 +253,8 @@ mod tests {
             ..Default::default()
         };
 
-        let skin_result = Vibrance.process_cpu(skin.clone(), &params).unwrap();
-        let blue_result = Vibrance.process_cpu(blue.clone(), &params).unwrap();
+        let skin_result = Vibrance.process_cpu(skin, &params).unwrap();
+        let blue_result = Vibrance.process_cpu(blue, &params).unwrap();
 
         let skin_spread_before = 0.6 - 0.2;
         let skin_spread_after = skin_result.data[0] - skin_result.data[2];
