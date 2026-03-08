@@ -136,6 +136,7 @@ fn color_controls(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn control<'a>(
     label: &'static str,
     value_text: String,
