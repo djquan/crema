@@ -20,6 +20,7 @@ pub struct Photo {
     pub date_taken: Option<String>,
     pub imported_at: String,
     pub thumbnail_path: Option<String>,
+    pub rating: i32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

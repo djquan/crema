@@ -1,5 +1,5 @@
-use iced::widget::{Space, button, column, container, image, row, scrollable, text};
-use iced::{Alignment, Background, Border, Color, ContentFit, Element, Length, Shadow, Theme};
+use iced::widget::{Space, button, column, container, row, scrollable, text};
+use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
 use crema_catalog::models::Photo;
 
@@ -199,24 +199,44 @@ fn photo_area(app: &App) -> Element<'_, Message> {
         text(app.status_message()).size(11).color(MUTED).into()
     };
 
+    let zoom_label = app.zoom_state().zoom_label();
+    let zoom_controls: Element<'_, Message> = if app.zoom_state().is_fit() {
+        text(zoom_label).size(11).color(MUTED).into()
+    } else {
+        row![
+            text(zoom_label).size(11).color(ACCENT),
+            Space::new().width(6),
+            button("Reset")
+                .on_press(Message::ResetZoom)
+                .padding([2, 6])
+                .style(button::text),
+        ]
+        .align_y(Alignment::Center)
+        .into()
+    };
+
+    let before_after: Element<'_, Message> = if app.showing_before() {
+        button("Before")
+            .on_press(Message::ToggleBeforeAfter)
+            .padding([2, 8])
+            .style(primary_action)
+            .into()
+    } else {
+        Space::new().into()
+    };
+
     let status_line = row![
-        text("Fit").size(11).color(MUTED),
+        zoom_controls,
+        Space::new().width(8),
+        before_after,
         Space::new().width(Length::Fill),
         status_message
     ]
     .align_y(Alignment::Center);
 
-    let content: Element<'_, Message> = if let Some(handle) = app.processed_image() {
-        container(
-            image(handle.clone())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .content_fit(ContentFit::Contain)
-                .expand(true),
-        )
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .into()
+    let (pw, ph) = app.preview_dimensions();
+    let content: Element<'_, Message> = if let Some(handle) = app.display_image() {
+        widgets::zoomable_image::view(handle, pw, ph, app.zoom_state())
     } else if app.is_loading_photo() {
         empty_viewport(
             "Loading photo",

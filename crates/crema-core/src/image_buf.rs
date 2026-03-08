@@ -153,7 +153,7 @@ fn linear_to_srgb_u8(v: f32) -> u8 {
 }
 
 /// Non-destructive edit parameters for a photo.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EditParams {
     pub exposure: f32,
     pub wb_temp: f32,

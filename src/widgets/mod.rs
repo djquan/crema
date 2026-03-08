@@ -4,3 +4,4 @@ pub mod filmstrip;
 pub mod histogram;
 pub mod metadata_panel;
 pub mod thumbnail_grid;
+pub mod zoomable_image;

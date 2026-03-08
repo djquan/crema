@@ -4,14 +4,17 @@ A GPU-accelerated photo editor and browser, built in Rust. Think Lightroom, but 
 
 ## Features (v0.1)
 
-- Import photos from a folder (JPEG, PNG, TIFF, and 30+ RAW formats via rawler)
-- Browse photos in a thumbnail grid (lighttable view)
-- Open a photo in the darkroom view with real-time editing
-- Non-destructive edits: exposure compensation, white balance (temperature + tint)
+- Import photos from files or folders (JPEG, PNG, TIFF, and 30 RAW formats via rawler)
+- Browse photos in a responsive thumbnail grid (Library view) with date sidebar filtering
+- Develop view with real-time editing, filmstrip navigation, and collapsible panels
+- Non-destructive edits: exposure, contrast, highlights, shadows, blacks, white balance (temperature + tint), vibrance, saturation, crop
+- One-click auto enhance (histogram analysis + gray-world white balance)
+- Export processed photos to JPEG/PNG/TIFF
 - Live RGB histogram
 - EXIF metadata display (camera, lens, focal length, aperture, shutter speed, ISO)
 - SQLite catalog with edit persistence
 - Thumbnail caching (blake3 content-addressed)
+- Native macOS menu bar with keyboard shortcuts (Cmd+I import, Cmd+E export)
 - Cross-platform: macOS + Linux
 
 ## Building

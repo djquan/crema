@@ -86,7 +86,7 @@ The foundational crate. Three modules:
 - `EditParams` holds all edit state: exposure (EV stops), wb_temp (Kelvin), wb_tint, contrast, highlights, shadows, blacks, vibrance, saturation, crop (normalized 0..1). Derives `Serialize`/`Deserialize` for SQLite persistence.
 
 **`raw.rs`** — File loading:
-- `RAW_EXTENSIONS`: 27 formats (cr2, cr3, nef, arw, dng, orf, raf, etc.)
+- `RAW_EXTENSIONS`: 30 formats (cr2, cr3, crw, nef, nrw, arw, srf, sr2, raf, rw2, orf, pef, dng, 3fr, ari, bay, cap, dcr, erf, fff, iiq, k25, kdc, mef, mos, mrw, raw, rwl, srw, x3f)
 - `IMAGE_EXTENSIONS`: jpg, jpeg, png, tiff, tif
 - `decode_raw(path)`: rawler decode -> `RawDevelop::default().develop_intermediate()` -> sRGB-to-linear conversion -> `ImageBuf`
 - `load_image(path)` / `load_any(path)`: dispatch by extension, standard images via `image` crate
@@ -129,25 +129,42 @@ SQLite persistence layer. Database at `~/.local/share/crema/catalog.db`.
 **Schema** (two tables):
 ```sql
 photos (
-    id INTEGER PRIMARY KEY,
-    file_path TEXT NOT NULL UNIQUE,  -- canonical absolute path
-    file_hash TEXT NOT NULL,         -- blake3 content hash
-    file_size INTEGER NOT NULL,
-    width, height INTEGER,           -- from EXIF
-    camera_make, camera_model, lens TEXT,
-    focal_length, aperture REAL,
-    shutter_speed TEXT, iso INTEGER,
-    date_taken TEXT,                  -- EXIF DateTimeOriginal
-    imported_at TEXT DEFAULT now,
+    id           INTEGER PRIMARY KEY,
+    file_path    TEXT NOT NULL UNIQUE,  -- canonical absolute path
+    file_hash    TEXT NOT NULL,         -- blake3 content hash
+    file_size    INTEGER NOT NULL,
+    width        INTEGER,              -- from EXIF
+    height       INTEGER,
+    camera_make  TEXT,
+    camera_model TEXT,
+    lens         TEXT,
+    focal_length REAL,
+    aperture     REAL,
+    shutter_speed TEXT,
+    iso          INTEGER,
+    date_taken   TEXT,                  -- EXIF DateTimeOriginal
+    imported_at  TEXT NOT NULL DEFAULT (datetime('now')),
     thumbnail_path TEXT
 )
 -- INDEX on file_hash
 
 edits (
-    id INTEGER PRIMARY KEY,
-    photo_id INTEGER NOT NULL UNIQUE REFERENCES photos(id),
-    exposure, wb_temp, wb_tint, crop_x, crop_y, crop_w, crop_h REAL,
-    updated_at TEXT DEFAULT now
+    id         INTEGER PRIMARY KEY,
+    photo_id   INTEGER NOT NULL UNIQUE REFERENCES photos(id),
+    exposure   REAL NOT NULL DEFAULT 0.0,
+    wb_temp    REAL NOT NULL DEFAULT 5500.0,
+    wb_tint    REAL NOT NULL DEFAULT 0.0,
+    contrast   REAL NOT NULL DEFAULT 0.0,   -- added via migration
+    highlights REAL NOT NULL DEFAULT 0.0,   -- added via migration
+    shadows    REAL NOT NULL DEFAULT 0.0,   -- added via migration
+    blacks     REAL NOT NULL DEFAULT 0.0,   -- added via migration
+    vibrance   REAL NOT NULL DEFAULT 0.0,   -- added via migration
+    saturation REAL NOT NULL DEFAULT 0.0,   -- added via migration
+    crop_x     REAL NOT NULL DEFAULT 0.0,
+    crop_y     REAL NOT NULL DEFAULT 0.0,
+    crop_w     REAL NOT NULL DEFAULT 1.0,
+    crop_h     REAL NOT NULL DEFAULT 1.0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 )
 ```
 
@@ -196,36 +213,54 @@ Uses iced 0.14's **function-based API** (not the old `Application` trait):
 - No `horizontal_space()` exists; use `Space::new().width(Length::Fill)`
 - Window: 1400x900, dark theme, antialiasing enabled
 
-**Two views** controlled by `View` enum in `app.rs`:
+**Two workspaces** controlled by `Workspace` enum in `app.rs`:
 
 ```
-Lighttable                              Darkroom
+Library                                 Develop
 ┌─────────────────────────────┐         ┌──────────────────────────────┐
-│ "Crema"        [Import]     │         │ [< Back]        "Darkroom"  │
+│ [Library][Develop] [Import] │         │ [Library][Develop]  [Export] │
+│                    [Export]  │         │              [Toggle Panel]  │
 ├────────┬────────────────────┤         ├───────────────────┬──────────┤
-│ Date   │                    │         │                   │Histogram │
-│ sidebar│  Thumbnail grid    │         │   Processed       ├──────────┤
-│ (tree) │  5 cols x 200px    │         │   image           │Edit panel│
-│        │  click->darkroom   │         │   (fill)          │ 9 sliders│
+│ Date   │ Selected: photo.cr2│         │                   │ Develop  │
+│ sidebar│ [Open In Develop]  │         │   Processed       │ [Auto]   │
+│ (tree) │                    │         │   image           │ [Reset]  │
+│        │  Responsive thumb  │         │   (fill)          ├──────────┤
+│        │  grid (210px       │         │                   │Histogram │
+│        │  target width)     │         │                   ├──────────┤
+│        │  click to select   │         │                   │Light     │
+│        │                    │         │                   │ 5 sliders│
 │        │                    │         │                   ├──────────┤
-│        │                    │         │                   │EXIF panel│
-├────────┴────────────────────┤         ├───────────────────┴──────────┤
-│ Status: "42 photos"         │         │                              │
-└─────────────────────────────┘         └──────────────────────────────┘
+│        │                    │         │                   │Color     │
+│        │                    │         │                   │ 4 sliders│
+│        │                    │         │                   ├──────────┤
+├────────┴────────────────────┤         │                   │EXIF panel│
+│ Status: "42 photos"         │         ├───────────────────┴──────────┤
+└─────────────────────────────┘         │ Filmstrip (92px thumbnails)  │
+                                        ├──────────────────────────────┤
+                                        │ Status bar                   │
+                                        └──────────────────────────────┘
 ```
+
+**Widgets:**
+- **Toolbar** (`views/unified.rs`): workspace switcher (Library/Develop tabs), Import, Export, panel toggle buttons
+- **Date sidebar** (`widgets/date_sidebar.rs`): hierarchical year > month > day tree built from photo `date_taken` fields, with expand/collapse and filter-by-click. `DateFilter` enum filters `filtered_photos()`
+- **Thumbnail grid** (`widgets/thumbnail_grid.rs`): responsive layout, TARGET_WIDTH=210px with MIN_WIDTH=170/MAX_WIDTH=240 bounds, dynamic column count
+- **Filmstrip** (`widgets/filmstrip.rs`): horizontal scrollable strip of 92px thumbnails shown below the Develop view image area
+- **Edit panel** (`widgets/edit_panel.rs`): collapsible sections: **Light** (exposure, contrast, highlights, shadows, blacks) and **Color** (temperature, tint, vibrance, saturation). Each control has a per-slider Reset button
+- **Histogram** (`widgets/histogram.rs`): iced canvas widget, three semi-transparent RGB channels, log scale (`ln_1p`)
+- **Metadata panel** (`widgets/metadata_panel.rs`): EXIF data display
+- **Menu** (`menu.rs`): native macOS menu bar via `muda` crate, Cmd+I import, Cmd+E export
+- **Icon** (`icon.rs`): app icon from embedded PNG, sets macOS dock icon via objc2
 
 **Message-driven architecture** — key flows:
 
 1. **Startup**: open catalog -> `list_photos()` -> spawn thumbnail load tasks (cached + async)
-2. **Import**: `rfd::AsyncFileDialog::pick_files()` with extension filter -> `import_paths()` -> refresh
+2. **Import**: `rfd::AsyncFileDialog::pick_files()` with extension filter -> `import_paths()` -> refresh. Also via native menu Cmd+I
 3. **Open photo**: `load_any()` full-res + 2048px preview async -> store `Arc<ImageBuf>` -> `reprocess_image()`
 4. **Edit slider**: update `EditParams` -> `reprocess_image()` -> CPU pipeline on preview -> histogram -> display
 5. **Debouncing**: `processing_generation: u64` counter; stale `ImageProcessed` results are discarded
-6. **Edit persistence**: `save_edits()` called when `ImageProcessed` completes (natural debounce) and on `BackToGrid`
-
-**Date sidebar** (`widgets/date_sidebar.rs`): hierarchical year > month > day tree built from photo `date_taken` fields, with expand/collapse and filter-by-click. `DateFilter` enum filters `filtered_photos()`.
-
-**Histogram** (`widgets/histogram.rs`): iced canvas widget, three semi-transparent RGB channels, log scale (`ln_1p`).
+6. **Edit persistence**: `save_edits()` called when `ImageProcessed` completes (natural debounce) and on workspace switch back to Library
+7. **Export**: `rfd::AsyncFileDialog::save_file()` -> apply CPU pipeline to full-res original -> encode to JPEG/PNG/TIFF. Also via native menu Cmd+E
 
 ### Key Version Constraints
 

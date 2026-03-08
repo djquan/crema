@@ -114,6 +114,18 @@ fn photo_cell<'a>(
         .map(|value| value.chars().take(10).collect::<String>())
         .unwrap_or_else(|| "Unknown date".into());
 
+    let rating_label = if photo.rating > 0 {
+        "\u{2605}".repeat(photo.rating as usize)
+    } else {
+        String::new()
+    };
+
+    let mut info_row = row![text(date_label).size(11).color(MUTED)].spacing(6);
+    if !rating_label.is_empty() {
+        info_row = info_row.push(Space::new().width(Length::Fill));
+        info_row = info_row.push(text(rating_label).size(11).color(ACCENT));
+    }
+
     let mut card = column![
         button(thumb_content)
             .on_press(Message::SelectPhoto(photo.id))
@@ -121,7 +133,7 @@ fn photo_cell<'a>(
             .width(width)
             .style(move |_theme: &Theme, status| thumb_button_style(status, is_selected)),
         text(filename).size(12),
-        text(date_label).size(11).color(MUTED),
+        info_row,
     ]
     .spacing(6)
     .width(width);

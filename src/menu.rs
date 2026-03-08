@@ -9,12 +9,13 @@ use crate::app::Message;
 pub struct AppMenu {
     _menu: Menu,
     pub export_item: MenuItem,
+    pub undo_item: MenuItem,
+    pub redo_item: MenuItem,
 }
 
 pub fn build() -> AppMenu {
     let menu = Menu::new();
 
-    // macOS uses the first submenu as the app menu (title replaced with app name)
     let app_menu = Submenu::with_items(
         "crema",
         true,
@@ -55,7 +56,27 @@ pub fn build() -> AppMenu {
     )
     .expect("failed to create File menu");
 
-    menu.append_items(&[&app_menu, &file_menu])
+    let undo_item = MenuItem::with_id(
+        "undo",
+        "Undo",
+        false,
+        Some(Accelerator::new(Some(Modifiers::META), Code::KeyZ)),
+    );
+
+    let redo_item = MenuItem::with_id(
+        "redo",
+        "Redo",
+        false,
+        Some(Accelerator::new(
+            Some(Modifiers::META | Modifiers::SHIFT),
+            Code::KeyZ,
+        )),
+    );
+
+    let edit_menu = Submenu::with_id_and_items("edit", "Edit", true, &[&undo_item, &redo_item])
+        .expect("failed to create Edit menu");
+
+    menu.append_items(&[&app_menu, &file_menu, &edit_menu])
         .expect("failed to append menus");
 
     #[cfg(target_os = "macos")]
@@ -64,6 +85,8 @@ pub fn build() -> AppMenu {
     AppMenu {
         _menu: menu,
         export_item,
+        undo_item,
+        redo_item,
     }
 }
 
@@ -71,6 +94,8 @@ pub fn subscription() -> Subscription<Message> {
     iced::time::every(Duration::from_millis(50)).map(|_| match MenuEvent::receiver().try_recv() {
         Ok(event) if event.id == "import" => Message::Import,
         Ok(event) if event.id == "export" => Message::Export,
+        Ok(event) if event.id == "undo" => Message::Undo,
+        Ok(event) if event.id == "redo" => Message::Redo,
         _ => Message::Noop,
     })
 }

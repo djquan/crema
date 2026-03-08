@@ -13,6 +13,7 @@ use crema_thumbnails::cache::ThumbnailCache;
 use crate::views;
 use crate::widgets::date_sidebar::{DateExpansionKey, DateFilter};
 use crate::widgets::histogram::HistogramData;
+use crate::widgets::zoomable_image::ZoomState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Workspace {
@@ -47,6 +48,8 @@ pub enum EditControl {
     Saturation,
 }
 
+const MAX_UNDO_HISTORY: usize = 100;
+
 pub struct App {
     menu: Option<crate::menu::AppMenu>,
     workspace: Workspace,
@@ -64,6 +67,14 @@ pub struct App {
     histogram: Option<Box<HistogramData>>,
     edit_params: EditParams,
     current_exif: Vec<(String, String)>,
+
+    undo_stack: Vec<EditParams>,
+    redo_stack: Vec<EditParams>,
+
+    zoom_state: ZoomState,
+    preview_dimensions: (u32, u32),
+    original_display: Option<iced::widget::image::Handle>,
+    showing_before: bool,
 
     status_message: String,
 
@@ -106,6 +117,18 @@ pub enum Message {
     ResetEdits,
     ResetControl(EditControl),
     ResetSection(EditSection),
+    Undo,
+    Redo,
+    ZoomAtPoint(f32, f32, f32, f32, f32),
+    PanDelta(f32, f32),
+    ResetZoom,
+    ToggleBeforeAfter,
+    OriginalReady(iced::widget::image::Handle),
+    NextPhoto,
+    PrevPhoto,
+    NudgeExposure(f32),
+    SetRating(i32),
+    DeletePhoto,
 
     ImageLoaded(PhotoId, Arc<ImageBuf>, Arc<ImageBuf>, Vec<(String, String)>),
     ImageProcessed(u64, iced::widget::image::Handle, Box<HistogramData>),
@@ -143,6 +166,12 @@ impl App {
             histogram: None,
             edit_params: EditParams::default(),
             current_exif: Vec::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            zoom_state: ZoomState::default(),
+            preview_dimensions: (0, 0),
+            original_display: None,
+            showing_before: false,
             status_message: "Welcome to Crema. Import photos to get started.".into(),
             processing_generation: 0,
             thumbnail_cache_dir: dirs::cache_dir().map(|d| d.join("crema").join("thumbnails")),
@@ -223,52 +252,97 @@ impl App {
             Message::ExportPathSelected(path) => self.handle_export_path_selected(path),
             Message::ExportComplete(msg) => self.handle_export_complete(msg),
             Message::ExposureChanged(v) => {
+                self.snapshot_for_undo();
                 self.edit_params.exposure = v;
                 self.reprocess_image()
             }
             Message::ContrastChanged(v) => {
+                self.snapshot_for_undo();
                 self.edit_params.contrast = v;
                 self.reprocess_image()
             }
             Message::HighlightsChanged(v) => {
+                self.snapshot_for_undo();
                 self.edit_params.highlights = v;
                 self.reprocess_image()
             }
             Message::ShadowsChanged(v) => {
+                self.snapshot_for_undo();
                 self.edit_params.shadows = v;
                 self.reprocess_image()
             }
             Message::BlacksChanged(v) => {
+                self.snapshot_for_undo();
                 self.edit_params.blacks = v;
                 self.reprocess_image()
             }
             Message::WbTempChanged(v) => {
+                self.snapshot_for_undo();
                 self.edit_params.wb_temp = v;
                 self.reprocess_image()
             }
             Message::WbTintChanged(v) => {
+                self.snapshot_for_undo();
                 self.edit_params.wb_tint = v;
                 self.reprocess_image()
             }
             Message::VibranceChanged(v) => {
+                self.snapshot_for_undo();
                 self.edit_params.vibrance = v;
                 self.reprocess_image()
             }
             Message::SaturationChanged(v) => {
+                self.snapshot_for_undo();
                 self.edit_params.saturation = v;
                 self.reprocess_image()
             }
             Message::AutoEnhance => self.handle_auto_enhance(),
             Message::AutoEnhanceComplete(params) => {
+                self.snapshot_for_undo();
                 self.edit_params = params;
                 self.reprocess_image()
             }
             Message::ResetEdits => {
+                self.snapshot_for_undo();
                 self.edit_params = EditParams::default();
                 self.reprocess_image()
             }
             Message::ResetControl(control) => self.reset_control(control),
             Message::ResetSection(section) => self.reset_section(section),
+            Message::Undo => self.handle_undo(),
+            Message::Redo => self.handle_redo(),
+            Message::ZoomAtPoint(factor, cx, cy, vw, vh) => {
+                self.handle_zoom_at_point(factor, cx, cy, vw, vh);
+                Task::none()
+            }
+            Message::PanDelta(dx, dy) => {
+                self.zoom_state.pan.x += dx;
+                self.zoom_state.pan.y += dy;
+                Task::none()
+            }
+            Message::ResetZoom => {
+                self.zoom_state = ZoomState::default();
+                Task::none()
+            }
+            Message::ToggleBeforeAfter => {
+                if self.original_display.is_some() {
+                    self.showing_before = !self.showing_before;
+                }
+                Task::none()
+            }
+            Message::OriginalReady(handle) => {
+                self.original_display = Some(handle);
+                Task::none()
+            }
+            Message::NextPhoto => self.navigate_photo(1),
+            Message::PrevPhoto => self.navigate_photo(-1),
+            Message::NudgeExposure(delta) => {
+                self.snapshot_for_undo();
+                self.edit_params.exposure = (self.edit_params.exposure + delta).clamp(-5.0, 5.0);
+                self.reprocess_image()
+            }
+            Message::SetRating(rating) => self.handle_set_rating(rating),
+            Message::DeletePhoto => self.handle_delete_photo(),
             Message::SetDateFilter(filter) => {
                 self.date_filter = filter;
                 Task::none()
@@ -415,6 +489,10 @@ impl App {
         }
 
         self.save_current_edits();
+        self.clear_undo_history();
+        self.zoom_state = ZoomState::default();
+        self.original_display = None;
+        self.showing_before = false;
 
         self.selected_photo = Some(id);
         self.workspace = Workspace::Develop;
@@ -513,12 +591,23 @@ impl App {
 
         self.loaded_photo = Some(id);
         self.current_image = Some(buf);
-        self.preview_image = Some(preview);
+        self.preview_image = Some(preview.clone());
         self.current_exif = exif;
         self.is_loading_photo = false;
+        self.original_display = None;
+        self.showing_before = false;
         self.status_message = format!("Rendering {}...", self.current_photo_label());
         self.update_export_enabled();
-        self.reprocess_image()
+
+        let original_task = Task::perform(
+            async move {
+                let rgba = preview.to_rgba_u8_srgb();
+                iced::widget::image::Handle::from_rgba(preview.width, preview.height, rgba)
+            },
+            Message::OriginalReady,
+        );
+
+        Task::batch([self.reprocess_image(), original_task])
     }
 
     fn handle_image_processed(
@@ -534,6 +623,9 @@ impl App {
         self.processed_image = Some(handle);
         self.histogram = Some(hist);
         self.is_processing = false;
+        if let Some(ref preview) = self.preview_image {
+            self.preview_dimensions = (preview.width, preview.height);
+        }
         self.status_message = format!("Ready to edit {}", self.current_photo_label());
         self.save_current_edits();
         Task::none()
@@ -600,7 +692,15 @@ impl App {
     }
 
     pub fn subscription(&self) -> iced::Subscription<Message> {
-        crate::menu::subscription()
+        iced::Subscription::batch([
+            crate::menu::subscription(),
+            iced::keyboard::listen().map(|event| match event {
+                iced::keyboard::Event::KeyPressed { key, modifiers, .. } => {
+                    handle_key_press(key, modifiers).unwrap_or(Message::Noop)
+                }
+                _ => Message::Noop,
+            }),
+        ])
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -704,6 +804,7 @@ impl App {
     }
 
     fn reset_control(&mut self, control: EditControl) -> Task<Message> {
+        self.snapshot_for_undo();
         let defaults = EditParams::default();
 
         match control {
@@ -722,6 +823,7 @@ impl App {
     }
 
     fn reset_section(&mut self, section: EditSection) -> Task<Message> {
+        self.snapshot_for_undo();
         let defaults = EditParams::default();
 
         match section {
@@ -743,6 +845,168 @@ impl App {
         self.reprocess_image()
     }
 
+    fn snapshot_for_undo(&mut self) {
+        if self.undo_stack.last() == Some(&self.edit_params) {
+            return;
+        }
+        self.undo_stack.push(self.edit_params.clone());
+        if self.undo_stack.len() > MAX_UNDO_HISTORY {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+        self.update_undo_menu_state();
+    }
+
+    fn handle_undo(&mut self) -> Task<Message> {
+        let Some(prev) = self.undo_stack.pop() else {
+            return Task::none();
+        };
+        self.redo_stack.push(self.edit_params.clone());
+        self.edit_params = prev;
+        self.update_undo_menu_state();
+        self.reprocess_image()
+    }
+
+    fn handle_redo(&mut self) -> Task<Message> {
+        let Some(next) = self.redo_stack.pop() else {
+            return Task::none();
+        };
+        self.undo_stack.push(self.edit_params.clone());
+        self.edit_params = next;
+        self.update_undo_menu_state();
+        self.reprocess_image()
+    }
+
+    fn clear_undo_history(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.update_undo_menu_state();
+    }
+
+    fn update_undo_menu_state(&self) {
+        if let Some(menu) = &self.menu {
+            menu.undo_item.set_enabled(!self.undo_stack.is_empty());
+            menu.redo_item.set_enabled(!self.redo_stack.is_empty());
+        }
+    }
+
+    fn handle_zoom_at_point(&mut self, factor: f32, cx: f32, cy: f32, vw: f32, vh: f32) {
+        let old_zoom = self.zoom_state.zoom;
+        let new_zoom = (old_zoom * factor).clamp(1.0, 8.0);
+        if (new_zoom - old_zoom).abs() < 0.001 {
+            return;
+        }
+
+        // Zoom centered on cursor: adjust pan so the point under the cursor stays fixed.
+        // The cursor is at (cx, cy) relative to the viewport.
+        // The image center (without pan) is at (vw/2, vh/2).
+        let cursor_from_center_x = cx - vw / 2.0;
+        let cursor_from_center_y = cy - vh / 2.0;
+
+        let ratio = 1.0 - new_zoom / old_zoom;
+        self.zoom_state.pan.x += (cursor_from_center_x - self.zoom_state.pan.x) * ratio;
+        self.zoom_state.pan.y += (cursor_from_center_y - self.zoom_state.pan.y) * ratio;
+        self.zoom_state.zoom = new_zoom;
+
+        // Reset pan when returning to fit
+        if new_zoom <= 1.0 {
+            self.zoom_state.pan = iced::Vector::ZERO;
+        }
+    }
+
+    fn navigate_photo(&mut self, delta: i32) -> Task<Message> {
+        let filtered = self.filtered_photos();
+        if filtered.is_empty() {
+            return Task::none();
+        }
+
+        let current_idx = self
+            .selected_photo
+            .and_then(|id| filtered.iter().position(|p| p.id == id));
+
+        let new_idx = match current_idx {
+            Some(idx) => {
+                let len = filtered.len() as i32;
+                ((idx as i32 + delta).rem_euclid(len)) as usize
+            }
+            None => 0,
+        };
+
+        let new_id = filtered[new_idx].id;
+        drop(filtered);
+
+        if self.workspace == Workspace::Develop {
+            self.open_photo(new_id)
+        } else {
+            self.selected_photo = Some(new_id);
+            self.update_export_enabled();
+            Task::none()
+        }
+    }
+
+    fn handle_set_rating(&mut self, rating: i32) -> Task<Message> {
+        let Some(id) = self.selected_photo else {
+            return Task::none();
+        };
+        let rating = rating.clamp(0, 5);
+        if let Some(catalog) = &self.catalog
+            && let Err(err) = catalog.set_rating(id, rating)
+        {
+            error!(%err, "failed to set rating");
+            return Task::none();
+        }
+        if let Some(photo) = self.photos.iter_mut().find(|p| p.id == id) {
+            photo.rating = rating;
+        }
+        Task::none()
+    }
+
+    fn handle_delete_photo(&mut self) -> Task<Message> {
+        let Some(id) = self.selected_photo else {
+            return Task::none();
+        };
+        if let Some(catalog) = &self.catalog
+            && let Err(err) = catalog.delete_photo(id)
+        {
+            error!(%err, "failed to delete photo");
+            return Task::none();
+        }
+        self.photos.retain(|p| p.id != id);
+        self.thumbnails.remove(&id);
+        if self.loaded_photo == Some(id) {
+            self.loaded_photo = None;
+            self.current_image = None;
+            self.preview_image = None;
+            self.processed_image = None;
+            self.histogram = None;
+            self.current_exif.clear();
+        }
+        self.selected_photo = None;
+        self.update_export_enabled();
+        self.status_message = "Photo removed from catalog.".into();
+        Task::none()
+    }
+
+    pub fn zoom_state(&self) -> &ZoomState {
+        &self.zoom_state
+    }
+
+    pub fn preview_dimensions(&self) -> (u32, u32) {
+        self.preview_dimensions
+    }
+
+    pub fn showing_before(&self) -> bool {
+        self.showing_before
+    }
+
+    pub fn display_image(&self) -> Option<&iced::widget::image::Handle> {
+        if self.showing_before {
+            self.original_display.as_ref()
+        } else {
+            self.processed_image.as_ref()
+        }
+    }
+
     pub fn photos(&self) -> &[Photo] {
         &self.photos
     }
@@ -762,10 +1026,6 @@ impl App {
 
     pub fn preview_image(&self) -> Option<&Arc<ImageBuf>> {
         self.preview_image.as_ref()
-    }
-
-    pub fn processed_image(&self) -> Option<&iced::widget::image::Handle> {
-        self.processed_image.as_ref()
     }
 
     pub fn histogram(&self) -> Option<&HistogramData> {
@@ -924,6 +1184,35 @@ impl App {
         }
 
         "export.jpg".into()
+    }
+}
+
+fn handle_key_press(
+    key: iced::keyboard::Key,
+    modifiers: iced::keyboard::Modifiers,
+) -> Option<Message> {
+    use iced::keyboard::Key;
+    use iced::keyboard::key::Named;
+
+    // Avoid conflicts with muda menu accelerators (Cmd+Z, Cmd+Shift+Z handled there)
+    if modifiers.command() {
+        return None;
+    }
+
+    match key {
+        Key::Named(Named::ArrowRight) => Some(Message::NextPhoto),
+        Key::Named(Named::ArrowLeft) => Some(Message::PrevPhoto),
+        Key::Named(Named::Delete | Named::Backspace) => Some(Message::DeletePhoto),
+        Key::Character(c) if c.as_str() == "\\" => Some(Message::ToggleBeforeAfter),
+        Key::Character(c) if c.as_str() == "[" => Some(Message::NudgeExposure(-0.5)),
+        Key::Character(c) if c.as_str() == "]" => Some(Message::NudgeExposure(0.5)),
+        Key::Character(c) if c.as_str() == "r" && !modifiers.shift() => Some(Message::ResetEdits),
+        Key::Character(c) if c.as_str() == "f" && !modifiers.shift() => Some(Message::ResetZoom),
+        Key::Character(c) if matches!(c.as_str(), "0" | "1" | "2" | "3" | "4" | "5") => {
+            let rating = c.as_str().parse::<i32>().unwrap_or(0);
+            Some(Message::SetRating(rating))
+        }
+        _ => None,
     }
 }
 

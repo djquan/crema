@@ -309,6 +309,7 @@ mod tests {
             date_taken: date.map(String::from),
             imported_at: "2026-01-01".into(),
             thumbnail_path: None,
+            rating: 0,
         }
     }
 

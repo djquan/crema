@@ -72,6 +72,7 @@ impl Catalog {
             "ALTER TABLE edits ADD COLUMN blacks REAL NOT NULL DEFAULT 0.0",
             "ALTER TABLE edits ADD COLUMN vibrance REAL NOT NULL DEFAULT 0.0",
             "ALTER TABLE edits ADD COLUMN saturation REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE photos ADD COLUMN rating INTEGER NOT NULL DEFAULT 0",
         ];
         for stmt in alter_stmts {
             match self.conn.execute(stmt, []) {
@@ -120,7 +121,7 @@ impl Catalog {
         let mut stmt = self.conn.prepare(
             "SELECT id, file_path, file_hash, file_size, width, height,
                     camera_make, camera_model, lens, focal_length, aperture,
-                    shutter_speed, iso, date_taken, imported_at, thumbnail_path
+                    shutter_speed, iso, date_taken, imported_at, thumbnail_path, rating
              FROM photos WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_photo)?;
@@ -131,7 +132,7 @@ impl Catalog {
         let mut stmt = self.conn.prepare(
             "SELECT id, file_path, file_hash, file_size, width, height,
                     camera_make, camera_model, lens, focal_length, aperture,
-                    shutter_speed, iso, date_taken, imported_at, thumbnail_path
+                    shutter_speed, iso, date_taken, imported_at, thumbnail_path, rating
              FROM photos ORDER BY date_taken DESC, id DESC",
         )?;
         let photos = stmt
@@ -223,6 +224,22 @@ impl Catalog {
         Ok(())
     }
 
+    pub fn set_rating(&self, id: PhotoId, rating: i32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE photos SET rating = ?1 WHERE id = ?2",
+            params![rating.clamp(0, 5), id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_photo(&self, id: PhotoId) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM edits WHERE photo_id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM photos WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     pub fn photo_count(&self) -> Result<i64> {
         Ok(self
             .conn
@@ -248,6 +265,7 @@ fn row_to_photo(row: &rusqlite::Row<'_>) -> rusqlite::Result<Photo> {
         date_taken: row.get(13)?,
         imported_at: row.get(14)?,
         thumbnail_path: row.get(15)?,
+        rating: row.get(16)?,
     })
 }
 
@@ -543,6 +561,75 @@ mod tests {
         assert!((edit.blacks - (-10.0)).abs() < 1e-6);
         assert!((edit.vibrance - 15.0).abs() < 1e-6);
         assert!((edit.saturation - (-20.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn set_and_get_rating() {
+        let catalog = Catalog::open_in_memory().unwrap();
+        let id = catalog
+            .insert_photo(&minimal_photo("/rated.jpg"))
+            .unwrap()
+            .unwrap();
+
+        let photo = catalog.get_photo(id).unwrap().unwrap();
+        assert_eq!(photo.rating, 0);
+
+        catalog.set_rating(id, 3).unwrap();
+        let photo = catalog.get_photo(id).unwrap().unwrap();
+        assert_eq!(photo.rating, 3);
+
+        catalog.set_rating(id, 5).unwrap();
+        let photo = catalog.get_photo(id).unwrap().unwrap();
+        assert_eq!(photo.rating, 5);
+    }
+
+    #[test]
+    fn set_rating_clamps() {
+        let catalog = Catalog::open_in_memory().unwrap();
+        let id = catalog
+            .insert_photo(&minimal_photo("/clamp.jpg"))
+            .unwrap()
+            .unwrap();
+
+        catalog.set_rating(id, 10).unwrap();
+        let photo = catalog.get_photo(id).unwrap().unwrap();
+        assert_eq!(photo.rating, 5);
+
+        catalog.set_rating(id, -3).unwrap();
+        let photo = catalog.get_photo(id).unwrap().unwrap();
+        assert_eq!(photo.rating, 0);
+    }
+
+    #[test]
+    fn delete_photo_removes_photo_and_edits() {
+        let catalog = Catalog::open_in_memory().unwrap();
+        let id = catalog
+            .insert_photo(&minimal_photo("/delete_me.jpg"))
+            .unwrap()
+            .unwrap();
+
+        let params = crema_core::image_buf::EditParams {
+            exposure: 1.0,
+            ..Default::default()
+        };
+        catalog.save_edits(id, &params).unwrap();
+
+        catalog.delete_photo(id).unwrap();
+        assert!(catalog.get_photo(id).unwrap().is_none());
+        assert!(catalog.get_edits(id).unwrap().is_none());
+        assert_eq!(catalog.photo_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn rating_default_zero_in_list() {
+        let catalog = Catalog::open_in_memory().unwrap();
+        catalog
+            .insert_photo(&minimal_photo("/default_rating.jpg"))
+            .unwrap()
+            .unwrap();
+
+        let photos = catalog.list_photos().unwrap();
+        assert_eq!(photos[0].rating, 0);
     }
 
     #[test]
