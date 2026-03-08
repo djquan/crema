@@ -195,6 +195,10 @@ pub struct EditParams {
     #[serde(default = "default_sharpen_radius")]
     pub sharpen_radius: f32,
     #[serde(default)]
+    pub vignette_amount: f32,
+    #[serde(default)]
+    pub distortion: f32,
+    #[serde(default)]
     pub rotation: f32,
     pub crop_x: f32,
     pub crop_y: f32,
@@ -230,6 +234,8 @@ impl Default for EditParams {
             nr_color: 0.0,
             sharpen_amount: 0.0,
             sharpen_radius: 1.0,
+            vignette_amount: 0.0,
+            distortion: 0.0,
             rotation: 0.0,
             crop_x: 0.0,
             crop_y: 0.0,
@@ -374,6 +380,8 @@ mod tests {
             nr_color: 25.0,
             sharpen_amount: 75.0,
             sharpen_radius: 2.0,
+            vignette_amount: -30.0,
+            distortion: 15.0,
             rotation: 12.5,
             crop_x: 0.1,
             crop_y: 0.2,

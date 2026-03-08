@@ -35,6 +35,7 @@ impl Pipeline {
                 Box::new(modules::Hsl),
                 Box::new(modules::NoiseReduction),
                 Box::new(modules::Sharpening),
+                Box::new(modules::LensCorrection),
                 Box::new(modules::Crop),
             ],
         }
@@ -139,6 +140,7 @@ mod tests {
                 "hsl",
                 "noise_reduction",
                 "sharpening",
+                "lens_correction",
                 "crop",
             ]
         );

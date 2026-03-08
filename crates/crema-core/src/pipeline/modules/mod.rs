@@ -1,6 +1,7 @@
 mod crop;
 mod exposure;
 mod hsl;
+mod lens_correction;
 mod noise_reduction;
 mod saturation;
 mod sharpening;
@@ -12,6 +13,7 @@ mod white_balance;
 pub use crop::Crop;
 pub use exposure::Exposure;
 pub use hsl::Hsl;
+pub use lens_correction::LensCorrection;
 pub use noise_reduction::NoiseReduction;
 pub use saturation::Saturation;
 pub use sharpening::Sharpening;

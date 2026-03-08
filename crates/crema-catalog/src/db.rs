@@ -86,6 +86,8 @@ impl Catalog {
             "ALTER TABLE edits ADD COLUMN rotation REAL NOT NULL DEFAULT 0.0",
             "ALTER TABLE edits ADD COLUMN nr_luminance REAL NOT NULL DEFAULT 0.0",
             "ALTER TABLE edits ADD COLUMN nr_color REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE edits ADD COLUMN vignette_amount REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE edits ADD COLUMN distortion REAL NOT NULL DEFAULT 0.0",
         ];
         for stmt in alter_stmts {
             match self.conn.execute(stmt, []) {
@@ -172,7 +174,8 @@ impl Catalog {
                     crop_x, crop_y, crop_w, crop_h, updated_at,
                     split_shadow_hue, split_shadow_sat,
                     split_highlight_hue, split_highlight_sat, split_balance,
-                    nr_luminance, nr_color
+                    nr_luminance, nr_color,
+                    vignette_amount, distortion
              FROM edits WHERE photo_id = ?1",
         )?;
         let mut rows = stmt.query_map(params![photo_id], |row| {
@@ -206,6 +209,8 @@ impl Catalog {
                 split_balance: row.get(26)?,
                 nr_luminance: row.get(27)?,
                 nr_color: row.get(28)?,
+                vignette_amount: row.get(29)?,
+                distortion: row.get(30)?,
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -225,8 +230,9 @@ impl Catalog {
                                 crop_x, crop_y, crop_w, crop_h,
                                 split_shadow_hue, split_shadow_sat,
                                 split_highlight_hue, split_highlight_sat, split_balance,
-                                nr_luminance, nr_color)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)
+                                nr_luminance, nr_color,
+                                vignette_amount, distortion)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)
              ON CONFLICT(photo_id) DO UPDATE SET
                 exposure = excluded.exposure,
                 wb_temp = excluded.wb_temp,
@@ -254,6 +260,8 @@ impl Catalog {
                 split_balance = excluded.split_balance,
                 nr_luminance = excluded.nr_luminance,
                 nr_color = excluded.nr_color,
+                vignette_amount = excluded.vignette_amount,
+                distortion = excluded.distortion,
                 updated_at = datetime('now')",
             params![
                 photo_id,
@@ -283,6 +291,8 @@ impl Catalog {
                 params.split_balance,
                 params.nr_luminance,
                 params.nr_color,
+                params.vignette_amount,
+                params.distortion,
             ],
         )?;
         Ok(())
@@ -590,6 +600,8 @@ mod tests {
             nr_color: 20.0,
             sharpen_amount: 50.0,
             sharpen_radius: 1.5,
+            vignette_amount: -25.0,
+            distortion: 10.0,
             rotation: 12.5,
             crop_x: 0.1,
             crop_y: 0.2,
@@ -608,6 +620,8 @@ mod tests {
         assert!((converted.blacks - (-15.0)).abs() < 1e-6);
         assert!((converted.vibrance - 20.0).abs() < 1e-6);
         assert!((converted.saturation - (-10.0)).abs() < 1e-6);
+        assert!((converted.vignette_amount - (-25.0)).abs() < 1e-6);
+        assert!((converted.distortion - 10.0).abs() < 1e-6);
         assert!((converted.crop_x - 0.1).abs() < 1e-6);
         assert!((converted.crop_h - 0.6).abs() < 1e-6);
     }

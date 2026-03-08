@@ -42,6 +42,7 @@ pub enum PanelSection {
     SplitTone,
     Denoise,
     Detail,
+    Lens,
     Crop,
     Metadata,
 }
@@ -54,6 +55,7 @@ pub enum EditSection {
     SplitTone,
     Denoise,
     Detail,
+    Lens,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +81,8 @@ pub enum EditControl {
     NrColor,
     SharpenAmount,
     SharpenRadius,
+    VignetteAmount,
+    Distortion,
     Rotation,
 }
 
@@ -171,6 +175,8 @@ pub enum Message {
     NrColorChanged(f32),
     SharpenAmountChanged(f32),
     SharpenRadiusChanged(f32),
+    VignetteAmountChanged(f32),
+    DistortionChanged(f32),
     RotationChanged(f32),
     AutoEnhance,
     AutoEnhanceComplete(EditParams),
@@ -475,6 +481,16 @@ impl App {
             Message::SharpenRadiusChanged(v) => {
                 self.snapshot_for_undo();
                 self.edit_params.sharpen_radius = v;
+                self.reprocess_image()
+            }
+            Message::VignetteAmountChanged(v) => {
+                self.snapshot_for_undo();
+                self.edit_params.vignette_amount = v;
+                self.reprocess_image()
+            }
+            Message::DistortionChanged(v) => {
+                self.snapshot_for_undo();
+                self.edit_params.distortion = v;
                 self.reprocess_image()
             }
             Message::RotationChanged(v) => {
@@ -1305,6 +1321,10 @@ impl App {
             EditControl::NrColor => self.edit_params.nr_color = defaults.nr_color,
             EditControl::SharpenAmount => self.edit_params.sharpen_amount = defaults.sharpen_amount,
             EditControl::SharpenRadius => self.edit_params.sharpen_radius = defaults.sharpen_radius,
+            EditControl::VignetteAmount => {
+                self.edit_params.vignette_amount = defaults.vignette_amount
+            }
+            EditControl::Distortion => self.edit_params.distortion = defaults.distortion,
             EditControl::Rotation => self.edit_params.rotation = defaults.rotation,
         }
 
@@ -1348,6 +1368,10 @@ impl App {
             EditSection::Detail => {
                 self.edit_params.sharpen_amount = defaults.sharpen_amount;
                 self.edit_params.sharpen_radius = defaults.sharpen_radius;
+            }
+            EditSection::Lens => {
+                self.edit_params.vignette_amount = defaults.vignette_amount;
+                self.edit_params.distortion = defaults.distortion;
             }
         }
 
@@ -1781,6 +1805,10 @@ impl App {
             EditControl::SharpenRadius => {
                 self.edit_params.sharpen_radius != defaults.sharpen_radius
             }
+            EditControl::VignetteAmount => {
+                self.edit_params.vignette_amount != defaults.vignette_amount
+            }
+            EditControl::Distortion => self.edit_params.distortion != defaults.distortion,
             EditControl::Rotation => self.edit_params.rotation != defaults.rotation,
         }
     }

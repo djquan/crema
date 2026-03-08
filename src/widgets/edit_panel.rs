@@ -59,6 +59,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
         detail_controls(app),
     ));
 
+    sections = sections.push(section_card(
+        "Lens",
+        app.is_panel_open(PanelSection::Lens),
+        Message::TogglePanelSection(PanelSection::Lens),
+        Some(Message::ResetSection(EditSection::Lens)),
+        lens_controls(app),
+    ));
+
     if app.workspace() == Workspace::Develop {
         sections = sections.push(section_card(
             "Crop",
@@ -330,6 +338,35 @@ fn detail_controls(app: &App) -> Element<'_, Message> {
             app.is_control_adjusted(EditControl::SharpenRadius),
             Message::SharpenRadiusChanged,
             Message::ResetControl(EditControl::SharpenRadius),
+        ),
+    ]
+    .spacing(10)
+    .into()
+}
+
+fn lens_controls(app: &App) -> Element<'_, Message> {
+    let params = app.edit_params();
+
+    column![
+        control(
+            "Vignette",
+            format!("{:.0}", params.vignette_amount),
+            -100.0..=100.0,
+            params.vignette_amount,
+            1.0,
+            app.is_control_adjusted(EditControl::VignetteAmount),
+            Message::VignetteAmountChanged,
+            Message::ResetControl(EditControl::VignetteAmount),
+        ),
+        control(
+            "Distortion",
+            format!("{:.0}", params.distortion),
+            -100.0..=100.0,
+            params.distortion,
+            1.0,
+            app.is_control_adjusted(EditControl::Distortion),
+            Message::DistortionChanged,
+            Message::ResetControl(EditControl::Distortion),
         ),
     ]
     .spacing(10)

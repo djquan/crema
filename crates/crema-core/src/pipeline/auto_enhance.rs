@@ -174,6 +174,8 @@ pub fn auto_enhance(buf: &ImageBuf) -> EditParams {
         nr_color: 0.0,
         sharpen_amount: 0.0,
         sharpen_radius: 1.0,
+        vignette_amount: 0.0,
+        distortion: 0.0,
         rotation: 0.0,
         crop_x: 0.0,
         crop_y: 0.0,

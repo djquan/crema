@@ -37,6 +37,10 @@ impl GpuPipeline {
                 "sharpen_combine",
                 include_str!("../shaders/sharpen_combine.wgsl"),
             ),
+            (
+                "lens_correction",
+                include_str!("../shaders/lens_correction.wgsl"),
+            ),
             ("crop", include_str!("../shaders/crop.wgsl")),
         ];
         for &(name, source) in shader_sources {
@@ -71,6 +75,7 @@ impl GpuPipeline {
         current = self.apply_split_tone(ctx, &current, params)?;
         current = self.apply_hsl(ctx, &current, params)?;
         current = self.apply_sharpening(ctx, &current, params)?;
+        current = self.apply_lens_correction(ctx, &current, params)?;
         current = self.apply_crop(ctx, &current, params)?;
         Ok(current)
     }
@@ -508,6 +513,43 @@ impl GpuPipeline {
 
         ctx.queue.submit(std::iter::once(encoder.finish()));
         Ok(())
+    }
+
+    fn apply_lens_correction(
+        &mut self,
+        ctx: &GpuContext,
+        input: &GpuTexture,
+        params: &EditParams,
+    ) -> Result<GpuTexture> {
+        if params.vignette_amount == 0.0 && params.distortion == 0.0 {
+            return self.passthrough(ctx, input);
+        }
+
+        debug!(
+            vignette = params.vignette_amount,
+            distortion = params.distortion,
+            "GPU lens correction"
+        );
+
+        let output = GpuTexture::create_storage(&ctx.device, input.width, input.height, "lens_out");
+
+        let cx = input.width as f32 * 0.5;
+        let cy = input.height as f32 * 0.5;
+        let r_max = cx.max(cy);
+
+        let data = [
+            params.vignette_amount / 100.0,
+            params.distortion / 100.0,
+            cx,
+            cy,
+            r_max,
+            input.width as f32,
+            input.height as f32,
+            0.0, // padding
+        ];
+
+        self.dispatch_simple(ctx, "lens_correction", input, &output, &data)?;
+        Ok(output)
     }
 
     fn apply_crop(
