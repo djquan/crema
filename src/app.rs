@@ -380,37 +380,13 @@ impl App {
         }
 
         self.update_export_enabled();
-
-        let cache_dir = self.thumbnail_cache_dir.clone();
-        let tasks: Vec<_> = self
-            .photos
-            .iter()
-            .filter(|p| !self.thumbnails.contains_key(&p.id))
-            .map(|p| {
-                let id = p.id;
-                let path = p.file_path.clone();
-                let cache_dir = cache_dir.clone();
-                Task::perform(
-                    async move {
-                        match load_thumbnail_bytes(&path, cache_dir.as_deref()) {
-                            Ok(bytes) => Some((id, bytes)),
-                            Err(_) => None,
-                        }
-                    },
-                    |result| match result {
-                        Some((id, bytes)) => Message::ThumbnailReady(id, bytes),
-                        None => Message::Noop,
-                    },
-                )
-            })
-            .collect();
-        Task::batch(tasks)
+        self.load_next_thumbnail_batch()
     }
 
     fn handle_thumbnail_ready(&mut self, id: PhotoId, bytes: Vec<u8>) -> Task<Message> {
         let handle = iced::widget::image::Handle::from_bytes(bytes);
         self.thumbnails.insert(id, handle);
-        Task::none()
+        self.load_next_thumbnail_batch()
     }
 
     fn handle_select_photo(&mut self, id: PhotoId) -> Task<Message> {
@@ -679,6 +655,35 @@ impl App {
                 Message::ImageProcessed(generation, handle, Box::new(histogram))
             },
         )
+    }
+
+    fn load_next_thumbnail_batch(&self) -> Task<Message> {
+        const THUMBNAIL_BATCH_SIZE: usize = 16;
+        let cache_dir = self.thumbnail_cache_dir.clone();
+        let tasks: Vec<_> = self
+            .photos
+            .iter()
+            .filter(|p| !self.thumbnails.contains_key(&p.id))
+            .take(THUMBNAIL_BATCH_SIZE)
+            .map(|p| {
+                let id = p.id;
+                let path = p.file_path.clone();
+                let cache_dir = cache_dir.clone();
+                Task::perform(
+                    async move {
+                        match load_thumbnail_bytes(&path, cache_dir.as_deref()) {
+                            Ok(bytes) => Some((id, bytes)),
+                            Err(_) => None,
+                        }
+                    },
+                    |result| match result {
+                        Some((id, bytes)) => Message::ThumbnailReady(id, bytes),
+                        None => Message::Noop,
+                    },
+                )
+            })
+            .collect();
+        Task::batch(tasks)
     }
 
     fn save_current_edits(&self) {

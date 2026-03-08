@@ -25,7 +25,8 @@ impl Catalog {
 
     fn migrate(&self) -> Result<()> {
         info!("running catalog migrations");
-        self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        self.conn
+            .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
         self.conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS photos (

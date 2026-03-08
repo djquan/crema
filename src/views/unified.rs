@@ -1,6 +1,8 @@
 use iced::widget::{Space, button, column, container, image, row, scrollable, text};
 use iced::{Alignment, Background, Border, Color, ContentFit, Element, Length, Shadow, Theme};
 
+use crema_catalog::models::Photo;
+
 use crate::app::{App, Message, PanelSection, Workspace};
 use crate::widgets;
 
@@ -13,13 +15,16 @@ const MUTED: Color = Color::from_rgb(0.66, 0.66, 0.69);
 const ACCENT: Color = Color::from_rgb(0.26, 0.52, 0.94);
 
 pub fn view(app: &App) -> Element<'_, Message> {
+    let filtered = app.filtered_photos();
+    let filtered_count = filtered.len();
+
     let content = match app.workspace() {
-        Workspace::Library => library_body(app),
+        Workspace::Library => library_body(app, filtered),
         Workspace::Develop => develop_body(app),
     };
 
     container(
-        column![toolbar(app), content, bottom_bar(app)]
+        column![toolbar(app, filtered_count), content, bottom_bar(app)]
             .width(Length::Fill)
             .height(Length::Fill)
             .spacing(0),
@@ -30,7 +35,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-fn toolbar(app: &App) -> Element<'_, Message> {
+fn toolbar(app: &App, filtered_count: usize) -> Element<'_, Message> {
     let workspace_switcher = row![
         workspace_button("Library", Workspace::Library, app.workspace(), true),
         workspace_button(
@@ -70,7 +75,7 @@ fn toolbar(app: &App) -> Element<'_, Message> {
         .width(Length::Fill)
     } else {
         column![
-            text(format!("{} photos", app.filtered_photos().len())).size(14),
+            text(format!("{} photos", filtered_count)).size(14),
             text("Select in Library, then open Develop.")
                 .size(11)
                 .color(MUTED),
@@ -100,18 +105,18 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-fn library_body(app: &App) -> Element<'_, Message> {
+fn library_body<'a>(app: &'a App, filtered: Vec<&'a Photo>) -> Element<'a, Message> {
     row![
         widgets::date_sidebar::view(app.photos(), app.date_filter(), app.expanded_dates()),
-        library_grid(app),
+        library_grid(app, filtered),
     ]
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }
 
-fn library_grid(app: &App) -> Element<'_, Message> {
-    let selection_label: Element<'_, Message> = if app.has_selection() {
+fn library_grid<'a>(app: &'a App, filtered: Vec<&'a Photo>) -> Element<'a, Message> {
+    let selection_label: Element<'a, Message> = if app.has_selection() {
         text(format!("Selected: {}", app.current_photo_label()))
             .size(12)
             .color(MUTED)
@@ -120,7 +125,7 @@ fn library_grid(app: &App) -> Element<'_, Message> {
         text("No photo selected").size(12).color(MUTED).into()
     };
 
-    let open_button: Element<'_, Message> = button("Open In Develop")
+    let open_button: Element<'a, Message> = button("Open In Develop")
         .on_press_maybe(
             app.has_selection()
                 .then_some(Message::SetWorkspace(Workspace::Develop)),
@@ -132,7 +137,7 @@ fn library_grid(app: &App) -> Element<'_, Message> {
     let heading = row![
         column![
             text("Library").size(20),
-            text(format!("{} visible photos", app.filtered_photos().len()))
+            text(format!("{} visible photos", filtered.len()))
                 .size(12)
                 .color(MUTED),
         ]
@@ -148,7 +153,7 @@ fn library_grid(app: &App) -> Element<'_, Message> {
         column![
             heading,
             scrollable(widgets::thumbnail_grid::view(
-                app.filtered_photos(),
+                filtered,
                 app.thumbnails(),
                 app.selected_photo(),
             ))

@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::color::{OKLAB_MAX_CHROMA, linear_srgb_to_oklab, linear_to_srgb};
+use crate::color::{OKLAB_MAX_CHROMA, linear_srgb_to_oklab};
 use crate::image_buf::{EditParams, ImageBuf};
 use crate::pipeline::module::ProcessingModule;
 
@@ -54,14 +54,13 @@ fn smoothstep(t: f32) -> f32 {
 
 /// Returns 0.0-1.0 indicating how much this pixel looks like a skin tone.
 ///
-/// Computes HSV hue from gamma-encoded (perceptual) RGB so that hue angles
-/// match standard HSV definitions. Skin tones cluster around hue 0-55
-/// degrees (red through warm yellow); the range wraps around 360/0 to
-/// catch very red skin tones at hue ~355-360.
+/// Computes HSV hue directly from linear RGB. Hue angles shift slightly
+/// compared to gamma-encoded space, but the smoothstep ramps (15-30 degree
+/// feather) absorb the difference. Avoids 3x powf(1/2.4) per pixel.
 fn skin_tone_weight(r: f32, g: f32, b: f32) -> f32 {
-    let rg = linear_to_srgb(r.max(0.0));
-    let gg = linear_to_srgb(g.max(0.0));
-    let bg = linear_to_srgb(b.max(0.0));
+    let rg = r.max(0.0);
+    let gg = g.max(0.0);
+    let bg = b.max(0.0);
 
     let max_ch = rg.max(gg).max(bg);
     let min_ch = rg.min(gg).min(bg);
