@@ -163,7 +163,7 @@ pub enum Message {
     NextPhoto,
     PrevPhoto,
     NudgeExposure(f32),
-    SetRating(i32),
+    RateAndAdvance(i32),
     DeletePhoto,
     ToggleCropMode,
     ExitCropMode,
@@ -467,7 +467,11 @@ impl App {
                 self.edit_params.exposure = (self.edit_params.exposure + delta).clamp(-5.0, 5.0);
                 self.reprocess_image()
             }
-            Message::SetRating(rating) => self.handle_set_rating(rating),
+            Message::RateAndAdvance(rating) => {
+                let rate_task = self.handle_set_rating(rating);
+                let advance_task = self.navigate_photo(1);
+                Task::batch([rate_task, advance_task])
+            }
             Message::DeletePhoto => self.handle_delete_photo(),
             Message::ToggleCropMode => self.handle_toggle_crop_mode(),
             Message::ExitCropMode => {
@@ -1493,8 +1497,11 @@ fn handle_key_press(
         Key::Character(c) if c.as_str() == "f" && !modifiers.shift() => Some(Message::ResetZoom),
         Key::Character(c) if matches!(c.as_str(), "0" | "1" | "2" | "3" | "4" | "5") => {
             let rating = c.as_str().parse::<i32>().unwrap_or(0);
-            Some(Message::SetRating(rating))
+            Some(Message::RateAndAdvance(rating))
         }
+        Key::Character(c) if c.as_str() == "p" => Some(Message::RateAndAdvance(1)),
+        Key::Character(c) if c.as_str() == "x" => Some(Message::RateAndAdvance(-1)),
+        Key::Character(c) if c.as_str() == "u" => Some(Message::RateAndAdvance(0)),
         _ => None,
     }
 }
