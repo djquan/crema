@@ -14,6 +14,7 @@ pub struct GpuPipeline {
     shaders: ShaderManager,
     image_params_bgl: wgpu::BindGroupLayout,
     tone_curve_bgl: wgpu::BindGroupLayout,
+    sharpen_combine_bgl: wgpu::BindGroupLayout,
 }
 
 impl GpuPipeline {
@@ -30,6 +31,11 @@ impl GpuPipeline {
             ("vibrance", include_str!("../shaders/vibrance.wgsl")),
             ("saturation", include_str!("../shaders/saturation.wgsl")),
             ("hsl", include_str!("../shaders/hsl.wgsl")),
+            ("sharpen_blur", include_str!("../shaders/sharpen_blur.wgsl")),
+            (
+                "sharpen_combine",
+                include_str!("../shaders/sharpen_combine.wgsl"),
+            ),
             ("crop", include_str!("../shaders/crop.wgsl")),
         ];
         for &(name, source) in shader_sources {
@@ -38,18 +44,18 @@ impl GpuPipeline {
 
         let image_params_bgl = create_image_params_layout(&ctx.device);
         let tone_curve_bgl = create_tone_curve_layout(&ctx.device);
+        let sharpen_combine_bgl = create_sharpen_combine_layout(&ctx.device);
 
         Self {
             shaders,
             image_params_bgl,
             tone_curve_bgl,
+            sharpen_combine_bgl,
         }
     }
 
     /// Run the full GPU pipeline:
-    /// WB -> Exposure -> ToneCurve -> Vibrance -> Saturation -> HSL -> Crop
-    ///
-    /// Sharpening is not included (falls back to CPU for that stage).
+    /// WB -> Exposure -> ToneCurve -> Vibrance -> Saturation -> HSL -> Sharpening -> Crop
     pub fn process(
         &mut self,
         ctx: &GpuContext,
@@ -62,7 +68,7 @@ impl GpuPipeline {
         current = self.apply_vibrance(ctx, &current, params)?;
         current = self.apply_saturation(ctx, &current, params)?;
         current = self.apply_hsl(ctx, &current, params)?;
-        // Note: sharpening skipped on GPU (done on CPU after download)
+        current = self.apply_sharpening(ctx, &current, params)?;
         current = self.apply_crop(ctx, &current, params)?;
         Ok(current)
     }
@@ -343,6 +349,135 @@ impl GpuPipeline {
         Ok(output)
     }
 
+    fn apply_sharpening(
+        &mut self,
+        ctx: &GpuContext,
+        input: &GpuTexture,
+        params: &EditParams,
+    ) -> Result<GpuTexture> {
+        if params.sharpen_amount == 0.0 {
+            return self.passthrough(ctx, input);
+        }
+
+        debug!(
+            amount = params.sharpen_amount,
+            radius = params.sharpen_radius,
+            "GPU sharpening"
+        );
+
+        let kernel = gaussian_kernel(params.sharpen_radius);
+        let kr = kernel.len() / 2;
+
+        // Pack kernel into 20-float array (padded with zeros)
+        let mut kernel_padded = [0.0_f32; 20];
+        for (i, &v) in kernel.iter().enumerate().take(20) {
+            kernel_padded[i] = v;
+        }
+
+        // Horizontal blur pass
+        let blur_h =
+            GpuTexture::create_storage(&ctx.device, input.width, input.height, "blur_h_out");
+        let mut h_data = vec![0.0_f32; 24]; // 4 u32-as-f32 + 20 kernel weights
+        h_data[0] = f32::from_bits(0u32); // direction = horizontal
+        h_data[1] = f32::from_bits(kr as u32); // kernel_radius
+        h_data[2] = 0.0;
+        h_data[3] = 0.0;
+        h_data[4..24].copy_from_slice(&kernel_padded);
+        self.dispatch_simple(ctx, "sharpen_blur", input, &blur_h, &h_data)?;
+
+        // Vertical blur pass
+        let blur_v =
+            GpuTexture::create_storage(&ctx.device, input.width, input.height, "blur_v_out");
+        let mut v_data = vec![0.0_f32; 24];
+        v_data[0] = f32::from_bits(1u32); // direction = vertical
+        v_data[1] = f32::from_bits(kr as u32);
+        v_data[2] = 0.0;
+        v_data[3] = 0.0;
+        v_data[4..24].copy_from_slice(&kernel_padded);
+        self.dispatch_simple(ctx, "sharpen_blur", &blur_h, &blur_v, &v_data)?;
+
+        // Combine pass: original + amount * (original - blurred)
+        let output =
+            GpuTexture::create_storage(&ctx.device, input.width, input.height, "sharp_out");
+        let amount = params.sharpen_amount / 100.0;
+        self.dispatch_sharpen_combine(ctx, input, &blur_v, &output, amount)?;
+
+        Ok(output)
+    }
+
+    fn dispatch_sharpen_combine(
+        &mut self,
+        ctx: &GpuContext,
+        original: &GpuTexture,
+        blurred: &GpuTexture,
+        output: &GpuTexture,
+        amount: f32,
+    ) -> Result<()> {
+        let params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sharpen_combine_params"),
+            size: 16, // amount + 3 padding, aligned to 16
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        ctx.queue.write_buffer(
+            &params_buf,
+            0,
+            bytemuck::cast_slice(&[amount, 0.0, 0.0, 0.0]),
+        );
+
+        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sharpen_combine_bg"),
+            layout: &self.sharpen_combine_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&original.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&blurred.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&output.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: params_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let pipeline = self.shaders.get_or_create_pipeline(
+            &ctx.device,
+            "sharpen_combine",
+            &self.sharpen_combine_bgl,
+        )?;
+
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("sharpen_combine_encoder"),
+            });
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("sharpen_combine_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(
+                original.width.div_ceil(WORKGROUP_SIZE),
+                original.height.div_ceil(WORKGROUP_SIZE),
+                1,
+            );
+        }
+
+        ctx.queue.submit(std::iter::once(encoder.finish()));
+        Ok(())
+    }
+
     fn apply_crop(
         &mut self,
         ctx: &GpuContext,
@@ -525,6 +660,79 @@ fn create_tone_curve_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             },
         ],
     })
+}
+
+fn create_sharpen_combine_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("sharpen_combine_bgl"),
+        entries: &[
+            // binding 0: original texture (read)
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::ReadOnly,
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            // binding 1: blurred texture (read)
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::ReadOnly,
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            // binding 2: output texture (write)
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            // binding 3: params uniform
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+fn gaussian_kernel(radius: f32) -> Vec<f32> {
+    let sigma = radius.max(0.1);
+    let kernel_radius = (sigma * 3.0).ceil() as usize;
+    let size = kernel_radius * 2 + 1;
+    let mut kernel = Vec::with_capacity(size);
+    let mut sum = 0.0;
+
+    for i in 0..size {
+        let x = i as f32 - kernel_radius as f32;
+        let v = (-x * x / (2.0 * sigma * sigma)).exp();
+        kernel.push(v);
+        sum += v;
+    }
+
+    for v in &mut kernel {
+        *v /= sum;
+    }
+
+    kernel
 }
 
 fn hue_rotation_matrix(degrees: f32) -> [f32; 9] {

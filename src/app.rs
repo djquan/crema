@@ -1517,19 +1517,7 @@ fn process_gpu(
     let input =
         crema_gpu::texture::GpuTexture::from_image_buf(&ctx.device, &ctx.queue, buf, "input");
     let output = pipeline.process(ctx, &input, params).ok()?;
-    let mut result = output.download(&ctx.device, &ctx.queue).ok()?;
-
-    // Apply sharpening on CPU (not implemented on GPU)
-    if params.sharpen_amount != 0.0 {
-        let sharpening = crema_core::pipeline::modules::Sharpening;
-        result = crema_core::pipeline::module::ProcessingModule::process_cpu(
-            &sharpening,
-            result,
-            params,
-        )
-        .ok()?;
-    }
-
+    let result = output.download(&ctx.device, &ctx.queue).ok()?;
     Some(result)
 }
 
