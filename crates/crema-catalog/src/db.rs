@@ -83,6 +83,7 @@ impl Catalog {
             "ALTER TABLE edits ADD COLUMN split_highlight_hue REAL NOT NULL DEFAULT 0.0",
             "ALTER TABLE edits ADD COLUMN split_highlight_sat REAL NOT NULL DEFAULT 0.0",
             "ALTER TABLE edits ADD COLUMN split_balance REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE edits ADD COLUMN rotation REAL NOT NULL DEFAULT 0.0",
         ];
         for stmt in alter_stmts {
             match self.conn.execute(stmt, []) {
@@ -165,6 +166,7 @@ impl Catalog {
                     contrast, highlights, shadows, blacks, vibrance, saturation,
                     hsl_hue, hsl_saturation, hsl_lightness,
                     sharpen_amount, sharpen_radius,
+                    rotation,
                     crop_x, crop_y, crop_w, crop_h, updated_at,
                     split_shadow_hue, split_shadow_sat,
                     split_highlight_hue, split_highlight_sat, split_balance
@@ -188,16 +190,17 @@ impl Catalog {
                 hsl_lightness: row.get(13)?,
                 sharpen_amount: row.get(14)?,
                 sharpen_radius: row.get(15)?,
-                crop_x: row.get(16)?,
-                crop_y: row.get(17)?,
-                crop_w: row.get(18)?,
-                crop_h: row.get(19)?,
-                updated_at: row.get(20)?,
-                split_shadow_hue: row.get(21)?,
-                split_shadow_sat: row.get(22)?,
-                split_highlight_hue: row.get(23)?,
-                split_highlight_sat: row.get(24)?,
-                split_balance: row.get(25)?,
+                rotation: row.get(16)?,
+                crop_x: row.get(17)?,
+                crop_y: row.get(18)?,
+                crop_w: row.get(19)?,
+                crop_h: row.get(20)?,
+                updated_at: row.get(21)?,
+                split_shadow_hue: row.get(22)?,
+                split_shadow_sat: row.get(23)?,
+                split_highlight_hue: row.get(24)?,
+                split_highlight_sat: row.get(25)?,
+                split_balance: row.get(26)?,
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -213,10 +216,11 @@ impl Catalog {
                                 contrast, highlights, shadows, blacks, vibrance, saturation,
                                 hsl_hue, hsl_saturation, hsl_lightness,
                                 sharpen_amount, sharpen_radius,
+                                rotation,
                                 crop_x, crop_y, crop_w, crop_h,
                                 split_shadow_hue, split_shadow_sat,
                                 split_highlight_hue, split_highlight_sat, split_balance)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
              ON CONFLICT(photo_id) DO UPDATE SET
                 exposure = excluded.exposure,
                 wb_temp = excluded.wb_temp,
@@ -232,6 +236,7 @@ impl Catalog {
                 hsl_lightness = excluded.hsl_lightness,
                 sharpen_amount = excluded.sharpen_amount,
                 sharpen_radius = excluded.sharpen_radius,
+                rotation = excluded.rotation,
                 crop_x = excluded.crop_x,
                 crop_y = excluded.crop_y,
                 crop_w = excluded.crop_w,
@@ -258,6 +263,7 @@ impl Catalog {
                 params.hsl_lightness,
                 params.sharpen_amount,
                 params.sharpen_radius,
+                params.rotation,
                 params.crop_x,
                 params.crop_y,
                 params.crop_w,
@@ -572,6 +578,7 @@ mod tests {
             split_balance: -10.0,
             sharpen_amount: 50.0,
             sharpen_radius: 1.5,
+            rotation: 12.5,
             crop_x: 0.1,
             crop_y: 0.2,
             crop_w: 0.5,

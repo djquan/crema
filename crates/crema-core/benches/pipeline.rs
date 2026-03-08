@@ -36,6 +36,7 @@ fn active_params() -> EditParams {
         crop_y: 0.05,
         crop_w: 0.9,
         crop_h: 0.9,
+        ..Default::default()
     }
 }
 

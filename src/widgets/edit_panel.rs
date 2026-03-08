@@ -300,6 +300,7 @@ fn detail_controls(app: &App) -> Element<'_, Message> {
 }
 
 fn crop_controls(app: &App) -> Element<'_, Message> {
+    let params = app.edit_params();
     let crop_active = app.crop_mode();
     let current_aspect = app.crop_aspect();
 
@@ -351,6 +352,16 @@ fn crop_controls(app: &App) -> Element<'_, Message> {
             .align_y(iced::Alignment::Center)
             .spacing(8),
         aspect_row,
+        control(
+            "Straighten",
+            format!("{:+.1}°", params.rotation),
+            -45.0..=45.0,
+            params.rotation,
+            0.1,
+            app.is_control_adjusted(EditControl::Rotation),
+            Message::RotationChanged,
+            Message::ResetControl(EditControl::Rotation),
+        ),
     ]
     .spacing(8)
     .into()

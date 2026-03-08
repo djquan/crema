@@ -75,6 +75,7 @@ pub enum EditControl {
     SplitBalance,
     SharpenAmount,
     SharpenRadius,
+    Rotation,
 }
 
 const MAX_UNDO_HISTORY: usize = 100;
@@ -158,6 +159,7 @@ pub enum Message {
     SplitBalanceChanged(f32),
     SharpenAmountChanged(f32),
     SharpenRadiusChanged(f32),
+    RotationChanged(f32),
     AutoEnhance,
     AutoEnhanceComplete(EditParams),
     ResetEdits,
@@ -433,6 +435,11 @@ impl App {
                 self.edit_params.sharpen_radius = v;
                 self.reprocess_image()
             }
+            Message::RotationChanged(v) => {
+                self.snapshot_for_undo();
+                self.edit_params.rotation = v;
+                self.reprocess_image()
+            }
             Message::AutoEnhance => self.handle_auto_enhance(),
             Message::AutoEnhanceComplete(params) => {
                 self.snapshot_for_undo();
@@ -462,12 +469,14 @@ impl App {
                         self.edit_params.crop_y,
                         self.edit_params.crop_w,
                         self.edit_params.crop_h,
+                        self.edit_params.rotation,
                     );
                     self.edit_params = clipboard;
                     self.edit_params.crop_x = crop.0;
                     self.edit_params.crop_y = crop.1;
                     self.edit_params.crop_w = crop.2;
                     self.edit_params.crop_h = crop.3;
+                    self.edit_params.rotation = crop.4;
                     self.status_message = "Pasted edits".into();
                     self.reprocess_image()
                 } else {
@@ -538,6 +547,7 @@ impl App {
                 self.edit_params.crop_y = 0.0;
                 self.edit_params.crop_w = 1.0;
                 self.edit_params.crop_h = 1.0;
+                self.edit_params.rotation = 0.0;
                 if self.crop_mode {
                     Task::none()
                 } else {
@@ -946,6 +956,7 @@ impl App {
             params.crop_y = 0.0;
             params.crop_w = 1.0;
             params.crop_h = 1.0;
+            params.rotation = 0.0;
         }
 
         let gpu = self.gpu.clone();
@@ -1058,6 +1069,7 @@ impl App {
             EditControl::SplitBalance => self.edit_params.split_balance = defaults.split_balance,
             EditControl::SharpenAmount => self.edit_params.sharpen_amount = defaults.sharpen_amount,
             EditControl::SharpenRadius => self.edit_params.sharpen_radius = defaults.sharpen_radius,
+            EditControl::Rotation => self.edit_params.rotation = defaults.rotation,
         }
 
         self.reprocess_image()
@@ -1523,6 +1535,7 @@ impl App {
             EditControl::SharpenRadius => {
                 self.edit_params.sharpen_radius != defaults.sharpen_radius
             }
+            EditControl::Rotation => self.edit_params.rotation != defaults.rotation,
         }
     }
 

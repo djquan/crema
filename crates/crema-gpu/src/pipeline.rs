@@ -520,6 +520,7 @@ impl GpuPipeline {
             && params.crop_y == 0.0
             && params.crop_w == 1.0
             && params.crop_h == 1.0
+            && params.rotation == 0.0
         {
             return self.passthrough(ctx, input);
         }
@@ -539,10 +540,12 @@ impl GpuPipeline {
 
         let output = GpuTexture::create_storage(&ctx.device, dst_w, dst_h, "crop_out");
 
-        // Pack u32 params as f32 bits
-        let data = [f32::from_bits(src_x), f32::from_bits(src_y), 0.0, 0.0];
+        let angle = -params.rotation.to_radians();
+        let sin_a = angle.sin();
+        let cos_a = angle.cos();
 
-        // Crop dispatches based on OUTPUT dimensions
+        let data = [f32::from_bits(src_x), f32::from_bits(src_y), sin_a, cos_a];
+
         let params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("crop_params"),
             size: 16,

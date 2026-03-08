@@ -172,6 +172,7 @@ pub fn auto_enhance(buf: &ImageBuf) -> EditParams {
         split_balance: 0.0,
         sharpen_amount: 0.0,
         sharpen_radius: 1.0,
+        rotation: 0.0,
         crop_x: 0.0,
         crop_y: 0.0,
         crop_w: 1.0,
