@@ -39,6 +39,7 @@ pub enum PanelSection {
     Light,
     Color,
     Hsl,
+    SplitTone,
     Detail,
     Crop,
     Metadata,
@@ -49,6 +50,7 @@ pub enum EditSection {
     Light,
     Color,
     Hsl,
+    SplitTone,
     Detail,
 }
 
@@ -66,6 +68,11 @@ pub enum EditControl {
     HslHue,
     HslSaturation,
     HslLightness,
+    SplitShadowHue,
+    SplitShadowSat,
+    SplitHighlightHue,
+    SplitHighlightSat,
+    SplitBalance,
     SharpenAmount,
     SharpenRadius,
 }
@@ -144,6 +151,11 @@ pub enum Message {
     HslHueChanged(f32),
     HslSaturationChanged(f32),
     HslLightnessChanged(f32),
+    SplitShadowHueChanged(f32),
+    SplitShadowSatChanged(f32),
+    SplitHighlightHueChanged(f32),
+    SplitHighlightSatChanged(f32),
+    SplitBalanceChanged(f32),
     SharpenAmountChanged(f32),
     SharpenRadiusChanged(f32),
     AutoEnhance,
@@ -384,6 +396,31 @@ impl App {
             Message::HslLightnessChanged(v) => {
                 self.snapshot_for_undo();
                 self.edit_params.hsl_lightness = v;
+                self.reprocess_image()
+            }
+            Message::SplitShadowHueChanged(v) => {
+                self.snapshot_for_undo();
+                self.edit_params.split_shadow_hue = v;
+                self.reprocess_image()
+            }
+            Message::SplitShadowSatChanged(v) => {
+                self.snapshot_for_undo();
+                self.edit_params.split_shadow_sat = v;
+                self.reprocess_image()
+            }
+            Message::SplitHighlightHueChanged(v) => {
+                self.snapshot_for_undo();
+                self.edit_params.split_highlight_hue = v;
+                self.reprocess_image()
+            }
+            Message::SplitHighlightSatChanged(v) => {
+                self.snapshot_for_undo();
+                self.edit_params.split_highlight_sat = v;
+                self.reprocess_image()
+            }
+            Message::SplitBalanceChanged(v) => {
+                self.snapshot_for_undo();
+                self.edit_params.split_balance = v;
                 self.reprocess_image()
             }
             Message::SharpenAmountChanged(v) => {
@@ -1006,6 +1043,19 @@ impl App {
             EditControl::HslHue => self.edit_params.hsl_hue = defaults.hsl_hue,
             EditControl::HslSaturation => self.edit_params.hsl_saturation = defaults.hsl_saturation,
             EditControl::HslLightness => self.edit_params.hsl_lightness = defaults.hsl_lightness,
+            EditControl::SplitShadowHue => {
+                self.edit_params.split_shadow_hue = defaults.split_shadow_hue
+            }
+            EditControl::SplitShadowSat => {
+                self.edit_params.split_shadow_sat = defaults.split_shadow_sat
+            }
+            EditControl::SplitHighlightHue => {
+                self.edit_params.split_highlight_hue = defaults.split_highlight_hue
+            }
+            EditControl::SplitHighlightSat => {
+                self.edit_params.split_highlight_sat = defaults.split_highlight_sat
+            }
+            EditControl::SplitBalance => self.edit_params.split_balance = defaults.split_balance,
             EditControl::SharpenAmount => self.edit_params.sharpen_amount = defaults.sharpen_amount,
             EditControl::SharpenRadius => self.edit_params.sharpen_radius = defaults.sharpen_radius,
         }
@@ -1035,6 +1085,13 @@ impl App {
                 self.edit_params.hsl_hue = defaults.hsl_hue;
                 self.edit_params.hsl_saturation = defaults.hsl_saturation;
                 self.edit_params.hsl_lightness = defaults.hsl_lightness;
+            }
+            EditSection::SplitTone => {
+                self.edit_params.split_shadow_hue = defaults.split_shadow_hue;
+                self.edit_params.split_shadow_sat = defaults.split_shadow_sat;
+                self.edit_params.split_highlight_hue = defaults.split_highlight_hue;
+                self.edit_params.split_highlight_sat = defaults.split_highlight_sat;
+                self.edit_params.split_balance = defaults.split_balance;
             }
             EditSection::Detail => {
                 self.edit_params.sharpen_amount = defaults.sharpen_amount;
@@ -1447,6 +1504,19 @@ impl App {
                 self.edit_params.hsl_saturation != defaults.hsl_saturation
             }
             EditControl::HslLightness => self.edit_params.hsl_lightness != defaults.hsl_lightness,
+            EditControl::SplitShadowHue => {
+                self.edit_params.split_shadow_hue != defaults.split_shadow_hue
+            }
+            EditControl::SplitShadowSat => {
+                self.edit_params.split_shadow_sat != defaults.split_shadow_sat
+            }
+            EditControl::SplitHighlightHue => {
+                self.edit_params.split_highlight_hue != defaults.split_highlight_hue
+            }
+            EditControl::SplitHighlightSat => {
+                self.edit_params.split_highlight_sat != defaults.split_highlight_sat
+            }
+            EditControl::SplitBalance => self.edit_params.split_balance != defaults.split_balance,
             EditControl::SharpenAmount => {
                 self.edit_params.sharpen_amount != defaults.sharpen_amount
             }

@@ -36,6 +36,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
     ));
 
     sections = sections.push(section_card(
+        "Split Tone",
+        app.is_panel_open(PanelSection::SplitTone),
+        Message::TogglePanelSection(PanelSection::SplitTone),
+        Some(Message::ResetSection(EditSection::SplitTone)),
+        split_tone_controls(app),
+    ));
+
+    sections = sections.push(section_card(
         "Detail",
         app.is_panel_open(PanelSection::Detail),
         Message::TogglePanelSection(PanelSection::Detail),
@@ -197,6 +205,65 @@ fn hsl_controls(app: &App) -> Element<'_, Message> {
             app.is_control_adjusted(EditControl::HslLightness),
             Message::HslLightnessChanged,
             Message::ResetControl(EditControl::HslLightness),
+        ),
+    ]
+    .spacing(10)
+    .into()
+}
+
+fn split_tone_controls(app: &App) -> Element<'_, Message> {
+    let params = app.edit_params();
+
+    column![
+        control(
+            "Shadow Hue",
+            format!("{:.0}", params.split_shadow_hue),
+            0.0..=360.0,
+            params.split_shadow_hue,
+            1.0,
+            app.is_control_adjusted(EditControl::SplitShadowHue),
+            Message::SplitShadowHueChanged,
+            Message::ResetControl(EditControl::SplitShadowHue),
+        ),
+        control(
+            "Shadow Saturation",
+            format!("{:.0}", params.split_shadow_sat),
+            0.0..=100.0,
+            params.split_shadow_sat,
+            1.0,
+            app.is_control_adjusted(EditControl::SplitShadowSat),
+            Message::SplitShadowSatChanged,
+            Message::ResetControl(EditControl::SplitShadowSat),
+        ),
+        control(
+            "Highlight Hue",
+            format!("{:.0}", params.split_highlight_hue),
+            0.0..=360.0,
+            params.split_highlight_hue,
+            1.0,
+            app.is_control_adjusted(EditControl::SplitHighlightHue),
+            Message::SplitHighlightHueChanged,
+            Message::ResetControl(EditControl::SplitHighlightHue),
+        ),
+        control(
+            "Highlight Saturation",
+            format!("{:.0}", params.split_highlight_sat),
+            0.0..=100.0,
+            params.split_highlight_sat,
+            1.0,
+            app.is_control_adjusted(EditControl::SplitHighlightSat),
+            Message::SplitHighlightSatChanged,
+            Message::ResetControl(EditControl::SplitHighlightSat),
+        ),
+        control(
+            "Balance",
+            format!("{:+.0}", params.split_balance),
+            -100.0..=100.0,
+            params.split_balance,
+            1.0,
+            app.is_control_adjusted(EditControl::SplitBalance),
+            Message::SplitBalanceChanged,
+            Message::ResetControl(EditControl::SplitBalance),
         ),
     ]
     .spacing(10)

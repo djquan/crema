@@ -78,6 +78,11 @@ impl Catalog {
             "ALTER TABLE edits ADD COLUMN sharpen_amount REAL NOT NULL DEFAULT 0.0",
             "ALTER TABLE edits ADD COLUMN sharpen_radius REAL NOT NULL DEFAULT 1.0",
             "ALTER TABLE photos ADD COLUMN rating INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE edits ADD COLUMN split_shadow_hue REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE edits ADD COLUMN split_shadow_sat REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE edits ADD COLUMN split_highlight_hue REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE edits ADD COLUMN split_highlight_sat REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE edits ADD COLUMN split_balance REAL NOT NULL DEFAULT 0.0",
         ];
         for stmt in alter_stmts {
             match self.conn.execute(stmt, []) {
@@ -160,7 +165,9 @@ impl Catalog {
                     contrast, highlights, shadows, blacks, vibrance, saturation,
                     hsl_hue, hsl_saturation, hsl_lightness,
                     sharpen_amount, sharpen_radius,
-                    crop_x, crop_y, crop_w, crop_h, updated_at
+                    crop_x, crop_y, crop_w, crop_h, updated_at,
+                    split_shadow_hue, split_shadow_sat,
+                    split_highlight_hue, split_highlight_sat, split_balance
              FROM edits WHERE photo_id = ?1",
         )?;
         let mut rows = stmt.query_map(params![photo_id], |row| {
@@ -186,6 +193,11 @@ impl Catalog {
                 crop_w: row.get(18)?,
                 crop_h: row.get(19)?,
                 updated_at: row.get(20)?,
+                split_shadow_hue: row.get(21)?,
+                split_shadow_sat: row.get(22)?,
+                split_highlight_hue: row.get(23)?,
+                split_highlight_sat: row.get(24)?,
+                split_balance: row.get(25)?,
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -201,8 +213,10 @@ impl Catalog {
                                 contrast, highlights, shadows, blacks, vibrance, saturation,
                                 hsl_hue, hsl_saturation, hsl_lightness,
                                 sharpen_amount, sharpen_radius,
-                                crop_x, crop_y, crop_w, crop_h)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+                                crop_x, crop_y, crop_w, crop_h,
+                                split_shadow_hue, split_shadow_sat,
+                                split_highlight_hue, split_highlight_sat, split_balance)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
              ON CONFLICT(photo_id) DO UPDATE SET
                 exposure = excluded.exposure,
                 wb_temp = excluded.wb_temp,
@@ -222,6 +236,11 @@ impl Catalog {
                 crop_y = excluded.crop_y,
                 crop_w = excluded.crop_w,
                 crop_h = excluded.crop_h,
+                split_shadow_hue = excluded.split_shadow_hue,
+                split_shadow_sat = excluded.split_shadow_sat,
+                split_highlight_hue = excluded.split_highlight_hue,
+                split_highlight_sat = excluded.split_highlight_sat,
+                split_balance = excluded.split_balance,
                 updated_at = datetime('now')",
             params![
                 photo_id,
@@ -243,6 +262,11 @@ impl Catalog {
                 params.crop_y,
                 params.crop_w,
                 params.crop_h,
+                params.split_shadow_hue,
+                params.split_shadow_sat,
+                params.split_highlight_hue,
+                params.split_highlight_sat,
+                params.split_balance,
             ],
         )?;
         Ok(())
@@ -541,6 +565,11 @@ mod tests {
             hsl_hue: 30.0,
             hsl_saturation: -20.0,
             hsl_lightness: 15.0,
+            split_shadow_hue: 220.0,
+            split_shadow_sat: 40.0,
+            split_highlight_hue: 45.0,
+            split_highlight_sat: 25.0,
+            split_balance: -10.0,
             sharpen_amount: 50.0,
             sharpen_radius: 1.5,
             crop_x: 0.1,

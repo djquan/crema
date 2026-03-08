@@ -30,6 +30,7 @@ impl GpuPipeline {
             ("tone_curve", include_str!("../shaders/tone_curve.wgsl")),
             ("vibrance", include_str!("../shaders/vibrance.wgsl")),
             ("saturation", include_str!("../shaders/saturation.wgsl")),
+            ("split_tone", include_str!("../shaders/split_tone.wgsl")),
             ("hsl", include_str!("../shaders/hsl.wgsl")),
             ("sharpen_blur", include_str!("../shaders/sharpen_blur.wgsl")),
             (
@@ -67,6 +68,7 @@ impl GpuPipeline {
         current = self.apply_tone_curve(ctx, &current, params)?;
         current = self.apply_vibrance(ctx, &current, params)?;
         current = self.apply_saturation(ctx, &current, params)?;
+        current = self.apply_split_tone(ctx, &current, params)?;
         current = self.apply_hsl(ctx, &current, params)?;
         current = self.apply_sharpening(ctx, &current, params)?;
         current = self.apply_crop(ctx, &current, params)?;
@@ -304,6 +306,36 @@ impl GpuPipeline {
         let output = GpuTexture::create_storage(&ctx.device, input.width, input.height, "sat_out");
         let blend = 1.0 + params.saturation / 100.0;
         self.dispatch_simple(ctx, "saturation", input, &output, &[blend, 0.0, 0.0, 0.0])?;
+        Ok(output)
+    }
+
+    fn apply_split_tone(
+        &mut self,
+        ctx: &GpuContext,
+        input: &GpuTexture,
+        params: &EditParams,
+    ) -> Result<GpuTexture> {
+        if params.split_shadow_sat == 0.0 && params.split_highlight_sat == 0.0 {
+            return self.passthrough(ctx, input);
+        }
+        debug!("GPU split tone");
+        let output =
+            GpuTexture::create_storage(&ctx.device, input.width, input.height, "split_out");
+
+        let shadow_rgb = hsl_to_rgb_tint(params.split_shadow_hue, params.split_shadow_sat / 100.0);
+        let highlight_rgb = hsl_to_rgb_tint(
+            params.split_highlight_hue,
+            params.split_highlight_sat / 100.0,
+        );
+
+        #[rustfmt::skip]
+        let data = [
+            shadow_rgb[0], shadow_rgb[1], shadow_rgb[2], params.split_shadow_sat / 100.0,
+            highlight_rgb[0], highlight_rgb[1], highlight_rgb[2], params.split_highlight_sat / 100.0,
+            params.split_balance, 0.0, 0.0, 0.0,
+        ];
+
+        self.dispatch_simple(ctx, "split_tone", input, &output, &data)?;
         Ok(output)
     }
 
@@ -733,6 +765,28 @@ fn gaussian_kernel(radius: f32) -> Vec<f32> {
     }
 
     kernel
+}
+
+fn hsl_to_rgb_tint(hue: f32, sat: f32) -> [f32; 3] {
+    if sat <= 0.0 {
+        return [0.5, 0.5, 0.5];
+    }
+    let h = hue % 360.0;
+    let c = sat;
+    let h_prime = h / 60.0;
+    let x = c * (1.0 - (h_prime % 2.0 - 1.0).abs());
+
+    let (r1, g1, b1) = match h_prime as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+
+    let m = 0.5 - c / 2.0;
+    [r1 + m, g1 + m, b1 + m]
 }
 
 fn hue_rotation_matrix(degrees: f32) -> [f32; 9] {
