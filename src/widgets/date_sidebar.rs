@@ -161,7 +161,10 @@ pub fn view<'a>(
     let tree = build_date_tree(photos);
     let mut items: Vec<Element<'a, Message>> = vec![
         text("Browse By Date").size(13).color(MUTED).into(),
-        text(format!("{} photos", tree.total)).size(11).color(MUTED).into(),
+        text(format!("{} photos", tree.total))
+            .size(11)
+            .color(MUTED)
+            .into(),
     ];
 
     items.push(filter_button(

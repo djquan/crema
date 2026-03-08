@@ -25,6 +25,7 @@ impl Catalog {
 
     fn migrate(&self) -> Result<()> {
         info!("running catalog migrations");
+        self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         self.conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS photos (
@@ -552,6 +553,17 @@ mod tests {
         let _catalog1 = Catalog::open(path_str).unwrap();
         drop(_catalog1);
         let _catalog2 = Catalog::open(path_str).unwrap();
+    }
+
+    #[test]
+    fn foreign_key_rejects_orphan_edit() {
+        let catalog = Catalog::open_in_memory().unwrap();
+        let params = crema_core::image_buf::EditParams::default();
+        let result = catalog.save_edits(999, &params);
+        assert!(
+            result.is_err(),
+            "FK should reject edit for nonexistent photo"
+        );
     }
 
     #[test]

@@ -103,10 +103,11 @@ fn get_string(exif: &exif::Exif, tag: Tag) -> Option<String> {
 }
 
 fn normalize_exif_string(s: String) -> Option<String> {
-    let mut value = s.trim_matches(|c: char| c == '\0' || c.is_whitespace());
-    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
-        value = &value[1..value.len() - 1];
-    }
+    let value = s.trim_matches(|c: char| c == '\0' || c.is_whitespace());
+    let value = value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .unwrap_or(value);
     let value = value.trim_matches(|c: char| c == '\0' || c.is_whitespace());
     if value.is_empty() {
         None

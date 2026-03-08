@@ -691,8 +691,9 @@ impl App {
 
     fn update_export_enabled(&self) {
         if let Some(menu) = &self.menu {
-            let enabled =
-                self.selected_photo.is_some() && self.current_image.is_some() && self.loaded_photo == self.selected_photo;
+            let enabled = self.selected_photo.is_some()
+                && self.current_image.is_some()
+                && self.loaded_photo == self.selected_photo;
             menu.export_item.set_enabled(enabled);
         }
     }

@@ -71,7 +71,9 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     } else {
         column![
             text(format!("{} photos", app.filtered_photos().len())).size(14),
-            text("Select in Library, then open Develop.").size(11).color(MUTED),
+            text("Select in Library, then open Develop.")
+                .size(11)
+                .color(MUTED),
         ]
         .spacing(2)
         .width(Length::Fill)
@@ -119,7 +121,10 @@ fn library_grid(app: &App) -> Element<'_, Message> {
     };
 
     let open_button: Element<'_, Message> = button("Open In Develop")
-        .on_press_maybe(app.has_selection().then_some(Message::SetWorkspace(Workspace::Develop)))
+        .on_press_maybe(
+            app.has_selection()
+                .then_some(Message::SetWorkspace(Workspace::Develop)),
+        )
         .padding([8, 14])
         .style(primary_action)
         .into();
@@ -160,16 +165,21 @@ fn library_grid(app: &App) -> Element<'_, Message> {
 }
 
 fn develop_body(app: &App) -> Element<'_, Message> {
-    let mut center = row![photo_area(app)].width(Length::Fill).height(Length::Fill);
+    let mut center = row![photo_area(app)]
+        .width(Length::Fill)
+        .height(Length::Fill);
 
     if app.right_panel_open() {
         center = center.push(right_panel(app));
     }
 
-    column![center, widgets::filmstrip::view(app.photos(), app.thumbnails(), app.selected_photo())]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    column![
+        center,
+        widgets::filmstrip::view(app.photos(), app.thumbnails(), app.selected_photo())
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 fn photo_area(app: &App) -> Element<'_, Message> {
@@ -228,12 +238,9 @@ fn photo_area(app: &App) -> Element<'_, Message> {
 
 fn empty_viewport<'a>(title: &'a str, body: &'a str) -> Element<'a, Message> {
     container(
-        column![
-            text(title).size(20),
-            text(body).size(13).color(MUTED),
-        ]
-        .spacing(6)
-        .width(Length::Fill),
+        column![text(title).size(20), text(body).size(13).color(MUTED),]
+            .spacing(6)
+            .width(Length::Fill),
     )
     .center_x(Length::Fill)
     .center_y(Length::Fill)
@@ -247,7 +254,11 @@ fn right_panel(app: &App) -> Element<'_, Message> {
         text("Develop").size(16),
         Space::new().width(Length::Fill),
         button("Auto")
-            .on_press_maybe(app.preview_image().is_some().then_some(Message::AutoEnhance))
+            .on_press_maybe(
+                app.preview_image()
+                    .is_some()
+                    .then_some(Message::AutoEnhance)
+            )
             .padding([4, 10])
             .style(secondary_action),
         Space::new().width(6),

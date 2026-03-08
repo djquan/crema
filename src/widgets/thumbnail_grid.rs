@@ -46,7 +46,12 @@ pub fn view<'a>(
         let mut current_row: Vec<Element<'a, Message>> = Vec::new();
 
         for photo in &photos {
-            current_row.push(photo_cell(photo, thumbnails.get(&photo.id), selected, cell_width));
+            current_row.push(photo_cell(
+                photo,
+                thumbnails.get(&photo.id),
+                selected,
+                cell_width,
+            ));
 
             if current_row.len() == columns {
                 grid_rows.push(row(std::mem::take(&mut current_row)).spacing(12).into());
@@ -138,7 +143,11 @@ fn photo_cell<'a>(
     container(card)
         .padding(10)
         .style(move |_theme: &Theme| container::Style {
-            background: Some(Background::Color(if is_selected { CARD_SELECTED } else { CARD_BG })),
+            background: Some(Background::Color(if is_selected {
+                CARD_SELECTED
+            } else {
+                CARD_BG
+            })),
             border: Border {
                 color: if is_selected { ACCENT } else { BORDER },
                 width: 1.0,

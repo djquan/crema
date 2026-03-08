@@ -182,6 +182,10 @@ fn planckian_with_tint(temp: f64, tint: f64) -> (f64, f64) {
     let dv = v_hi - v_lo;
     let len = (du * du + dv * dv).sqrt();
 
+    if len < 1e-12 {
+        return (x0, y0);
+    }
+
     // CW rotation of tangent: (dv, -du) points below the locus = magenta
     let perp_u = dv / len;
     let perp_v = -du / len;
@@ -200,11 +204,17 @@ fn planckian_with_tint(temp: f64, tint: f64) -> (f64, f64) {
 
 fn xy_to_uv60(x: f64, y: f64) -> (f64, f64) {
     let d = -2.0 * x + 12.0 * y + 3.0;
+    if d.abs() < 1e-10 {
+        return (0.0, 0.0);
+    }
     (4.0 * x / d, 6.0 * y / d)
 }
 
 fn uv60_to_xy(u: f64, v: f64) -> (f64, f64) {
     let d = 2.0 * u - 8.0 * v + 4.0;
+    if d.abs() < 1e-10 {
+        return (0.0, 0.0);
+    }
     (3.0 * u / d, 2.0 * v / d)
 }
 
@@ -227,17 +237,19 @@ fn bradford_cat(src_xyz: &[f64; 3], dst_xyz: &[f64; 3]) -> [f64; 9] {
     let src_lms = mat3_vec(&BRADFORD, src_xyz);
     let dst_lms = mat3_vec(&BRADFORD, dst_xyz);
 
+    let safe_div = |num: f64, den: f64| -> f64 { if den.abs() < 1e-10 { 1.0 } else { num / den } };
+
     // Diagonal scaling matrix
     let scale = [
-        dst_lms[0] / src_lms[0],
+        safe_div(dst_lms[0], src_lms[0]),
         0.0,
         0.0,
         0.0,
-        dst_lms[1] / src_lms[1],
+        safe_div(dst_lms[1], src_lms[1]),
         0.0,
         0.0,
         0.0,
-        dst_lms[2] / src_lms[2],
+        safe_div(dst_lms[2], src_lms[2]),
     ];
 
     // M_A^(-1) * scale * M_A
