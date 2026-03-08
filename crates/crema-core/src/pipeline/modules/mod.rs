@@ -1,6 +1,7 @@
 mod crop;
 mod exposure;
 mod hsl;
+mod noise_reduction;
 mod saturation;
 mod sharpening;
 mod split_tone;
@@ -11,6 +12,7 @@ mod white_balance;
 pub use crop::Crop;
 pub use exposure::Exposure;
 pub use hsl::Hsl;
+pub use noise_reduction::NoiseReduction;
 pub use saturation::Saturation;
 pub use sharpening::Sharpening;
 pub use split_tone::SplitTone;

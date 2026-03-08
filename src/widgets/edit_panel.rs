@@ -44,6 +44,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
     ));
 
     sections = sections.push(section_card(
+        "Denoise",
+        app.is_panel_open(PanelSection::Denoise),
+        Message::TogglePanelSection(PanelSection::Denoise),
+        Some(Message::ResetSection(EditSection::Denoise)),
+        denoise_controls(app),
+    ));
+
+    sections = sections.push(section_card(
         "Detail",
         app.is_panel_open(PanelSection::Detail),
         Message::TogglePanelSection(PanelSection::Detail),
@@ -264,6 +272,35 @@ fn split_tone_controls(app: &App) -> Element<'_, Message> {
             app.is_control_adjusted(EditControl::SplitBalance),
             Message::SplitBalanceChanged,
             Message::ResetControl(EditControl::SplitBalance),
+        ),
+    ]
+    .spacing(10)
+    .into()
+}
+
+fn denoise_controls(app: &App) -> Element<'_, Message> {
+    let params = app.edit_params();
+
+    column![
+        control(
+            "Luminance",
+            format!("{:.0}", params.nr_luminance),
+            0.0..=100.0,
+            params.nr_luminance,
+            1.0,
+            app.is_control_adjusted(EditControl::NrLuminance),
+            Message::NrLuminanceChanged,
+            Message::ResetControl(EditControl::NrLuminance),
+        ),
+        control(
+            "Color",
+            format!("{:.0}", params.nr_color),
+            0.0..=100.0,
+            params.nr_color,
+            1.0,
+            app.is_control_adjusted(EditControl::NrColor),
+            Message::NrColorChanged,
+            Message::ResetControl(EditControl::NrColor),
         ),
     ]
     .spacing(10)

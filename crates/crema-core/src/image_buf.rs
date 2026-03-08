@@ -187,6 +187,10 @@ pub struct EditParams {
     #[serde(default)]
     pub split_balance: f32,
     #[serde(default)]
+    pub nr_luminance: f32,
+    #[serde(default)]
+    pub nr_color: f32,
+    #[serde(default)]
     pub sharpen_amount: f32,
     #[serde(default = "default_sharpen_radius")]
     pub sharpen_radius: f32,
@@ -222,6 +226,8 @@ impl Default for EditParams {
             split_highlight_hue: 0.0,
             split_highlight_sat: 0.0,
             split_balance: 0.0,
+            nr_luminance: 0.0,
+            nr_color: 0.0,
             sharpen_amount: 0.0,
             sharpen_radius: 1.0,
             rotation: 0.0,
@@ -364,6 +370,8 @@ mod tests {
             split_highlight_hue: 45.0,
             split_highlight_sat: 20.0,
             split_balance: -15.0,
+            nr_luminance: 40.0,
+            nr_color: 25.0,
             sharpen_amount: 75.0,
             sharpen_radius: 2.0,
             rotation: 12.5,

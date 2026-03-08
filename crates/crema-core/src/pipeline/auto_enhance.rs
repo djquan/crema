@@ -170,6 +170,8 @@ pub fn auto_enhance(buf: &ImageBuf) -> EditParams {
         split_highlight_hue: 0.0,
         split_highlight_sat: 0.0,
         split_balance: 0.0,
+        nr_luminance: 0.0,
+        nr_color: 0.0,
         sharpen_amount: 0.0,
         sharpen_radius: 1.0,
         rotation: 0.0,

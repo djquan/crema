@@ -33,6 +33,7 @@ impl Pipeline {
                 Box::new(modules::Saturation),
                 Box::new(modules::SplitTone),
                 Box::new(modules::Hsl),
+                Box::new(modules::NoiseReduction),
                 Box::new(modules::Sharpening),
                 Box::new(modules::Crop),
             ],
@@ -136,6 +137,7 @@ mod tests {
                 "saturation",
                 "split_tone",
                 "hsl",
+                "noise_reduction",
                 "sharpening",
                 "crop",
             ]

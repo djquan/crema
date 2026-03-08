@@ -40,6 +40,7 @@ pub enum PanelSection {
     Color,
     Hsl,
     SplitTone,
+    Denoise,
     Detail,
     Crop,
     Metadata,
@@ -51,6 +52,7 @@ pub enum EditSection {
     Color,
     Hsl,
     SplitTone,
+    Denoise,
     Detail,
 }
 
@@ -73,6 +75,8 @@ pub enum EditControl {
     SplitHighlightHue,
     SplitHighlightSat,
     SplitBalance,
+    NrLuminance,
+    NrColor,
     SharpenAmount,
     SharpenRadius,
     Rotation,
@@ -157,6 +161,8 @@ pub enum Message {
     SplitHighlightHueChanged(f32),
     SplitHighlightSatChanged(f32),
     SplitBalanceChanged(f32),
+    NrLuminanceChanged(f32),
+    NrColorChanged(f32),
     SharpenAmountChanged(f32),
     SharpenRadiusChanged(f32),
     RotationChanged(f32),
@@ -423,6 +429,16 @@ impl App {
             Message::SplitBalanceChanged(v) => {
                 self.snapshot_for_undo();
                 self.edit_params.split_balance = v;
+                self.reprocess_image()
+            }
+            Message::NrLuminanceChanged(v) => {
+                self.snapshot_for_undo();
+                self.edit_params.nr_luminance = v;
+                self.reprocess_image()
+            }
+            Message::NrColorChanged(v) => {
+                self.snapshot_for_undo();
+                self.edit_params.nr_color = v;
                 self.reprocess_image()
             }
             Message::SharpenAmountChanged(v) => {
@@ -1067,6 +1083,8 @@ impl App {
                 self.edit_params.split_highlight_sat = defaults.split_highlight_sat
             }
             EditControl::SplitBalance => self.edit_params.split_balance = defaults.split_balance,
+            EditControl::NrLuminance => self.edit_params.nr_luminance = defaults.nr_luminance,
+            EditControl::NrColor => self.edit_params.nr_color = defaults.nr_color,
             EditControl::SharpenAmount => self.edit_params.sharpen_amount = defaults.sharpen_amount,
             EditControl::SharpenRadius => self.edit_params.sharpen_radius = defaults.sharpen_radius,
             EditControl::Rotation => self.edit_params.rotation = defaults.rotation,
@@ -1104,6 +1122,10 @@ impl App {
                 self.edit_params.split_highlight_hue = defaults.split_highlight_hue;
                 self.edit_params.split_highlight_sat = defaults.split_highlight_sat;
                 self.edit_params.split_balance = defaults.split_balance;
+            }
+            EditSection::Denoise => {
+                self.edit_params.nr_luminance = defaults.nr_luminance;
+                self.edit_params.nr_color = defaults.nr_color;
             }
             EditSection::Detail => {
                 self.edit_params.sharpen_amount = defaults.sharpen_amount;
@@ -1529,6 +1551,8 @@ impl App {
                 self.edit_params.split_highlight_sat != defaults.split_highlight_sat
             }
             EditControl::SplitBalance => self.edit_params.split_balance != defaults.split_balance,
+            EditControl::NrLuminance => self.edit_params.nr_luminance != defaults.nr_luminance,
+            EditControl::NrColor => self.edit_params.nr_color != defaults.nr_color,
             EditControl::SharpenAmount => {
                 self.edit_params.sharpen_amount != defaults.sharpen_amount
             }
