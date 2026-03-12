@@ -18,6 +18,7 @@ const BORDER: Color = Color::from_rgb(0.20, 0.20, 0.22);
 const ACCENT: Color = Color::from_rgb(0.26, 0.52, 0.94);
 const MULTI_ACCENT: Color = Color::from_rgb(0.20, 0.42, 0.78);
 const MUTED: Color = Color::from_rgb(0.66, 0.66, 0.69);
+const REJECTED: Color = Color::from_rgb(0.87, 0.43, 0.38);
 
 pub fn view<'a>(
     photos: Vec<&'a Photo>,
@@ -126,11 +127,15 @@ fn photo_cell<'a>(
     } else {
         String::new()
     };
+    let rejected_label = (photo.rating < 0).then_some("Rejected");
 
     let mut info_row = row![text(date_label).size(11).color(MUTED)].spacing(6);
     if !rating_label.is_empty() {
         info_row = info_row.push(Space::new().width(Length::Fill));
         info_row = info_row.push(text(rating_label).size(11).color(ACCENT));
+    } else if let Some(label) = rejected_label {
+        info_row = info_row.push(Space::new().width(Length::Fill));
+        info_row = info_row.push(text(label).size(11).color(REJECTED));
     }
 
     let highlight = is_selected || is_multi;

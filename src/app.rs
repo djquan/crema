@@ -221,7 +221,7 @@ pub enum Message {
 
     BatchExport,
     BatchExportFolderSelected(PathBuf),
-    BatchExportComplete(usize, usize),
+    BatchExportComplete(usize, usize, usize),
 
     SetDateFilter(DateFilter),
     SetRatingFilter(RatingFilter),
@@ -375,8 +375,8 @@ impl App {
             Message::BatchExportFolderSelected(folder) => {
                 self.handle_batch_export_folder_selected(folder)
             }
-            Message::BatchExportComplete(success, total) => {
-                self.handle_batch_export_complete(success, total)
+            Message::BatchExportComplete(success, skipped, total) => {
+                self.handle_batch_export_complete(success, skipped, total)
             }
             Message::ExposureChanged(v) => {
                 self.snapshot_for_undo();
@@ -1107,6 +1107,8 @@ impl App {
         Task::perform(
             async move {
                 let mut success_count = 0usize;
+                let mut skipped_count = 0usize;
+                let mut used_paths = std::collections::HashSet::new();
                 for (file_path, params) in &photo_data {
                     let path = std::path::Path::new(file_path);
                     let stem = path
@@ -1114,7 +1116,7 @@ impl App {
                         .unwrap_or_default()
                         .to_string_lossy()
                         .to_string();
-                    let output_path = folder.join(format!("{stem}.jpg"));
+                    let output_path = unique_export_path(&folder, &stem, "jpg", &mut used_paths);
 
                     let buf = match crema_core::raw::load_any(path) {
                         Ok(buf) => buf,
@@ -1127,19 +1129,35 @@ impl App {
                     let result = export_image(buf, params, &output_path);
                     if result.starts_with("Exported") {
                         success_count += 1;
+                        if output_path
+                            .file_stem()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name != stem)
+                        {
+                            skipped_count += 1;
+                        }
                     } else {
                         error!("{result}");
                     }
                 }
-                (success_count, total)
+                (success_count, skipped_count, total)
             },
-            |(success, total)| Message::BatchExportComplete(success, total),
+            |(success, skipped, total)| Message::BatchExportComplete(success, skipped, total),
         )
     }
 
-    fn handle_batch_export_complete(&mut self, success: usize, total: usize) -> Task<Message> {
+    fn handle_batch_export_complete(
+        &mut self,
+        success: usize,
+        skipped: usize,
+        total: usize,
+    ) -> Task<Message> {
         self.is_exporting = false;
-        self.status_message = format!("Exported {success}/{total} photos.");
+        self.status_message = if skipped > 0 {
+            format!("Exported {success}/{total} photos ({skipped} renamed to avoid conflicts).")
+        } else {
+            format!("Exported {success}/{total} photos.")
+        };
         Task::none()
     }
 
@@ -1534,7 +1552,7 @@ impl App {
         let Some(id) = self.selected_photo else {
             return Task::none();
         };
-        let rating = rating.clamp(0, 5);
+        let rating = rating.clamp(-1, 5);
         if let Some(catalog) = &self.catalog
             && let Err(err) = catalog.set_rating(id, rating)
         {
@@ -1868,6 +1886,10 @@ fn process_gpu(
     buf: &Arc<ImageBuf>,
     params: &EditParams,
 ) -> Option<ImageBuf> {
+    if !gpu_supports_preview_params(params) {
+        return None;
+    }
+
     let mut lock = gpu.lock().ok()?;
     let (ctx, pipeline) = &mut *lock;
 
@@ -1876,6 +1898,10 @@ fn process_gpu(
     let output = pipeline.process(ctx, &input, params).ok()?;
     let result = output.download(&ctx.device, &ctx.queue).ok()?;
     Some(result)
+}
+
+fn gpu_supports_preview_params(params: &EditParams) -> bool {
+    params.nr_luminance == 0.0 && params.nr_color == 0.0
 }
 
 fn dirs_catalog_path() -> String {
@@ -1895,6 +1921,27 @@ fn thumbnail_cache_key(path: &std::path::Path) -> String {
         hasher.update(&dur.as_nanos().to_le_bytes());
     }
     hasher.finalize().to_hex().to_string()
+}
+
+fn unique_export_path(
+    folder: &std::path::Path,
+    stem: &str,
+    ext: &str,
+    used_paths: &mut std::collections::HashSet<PathBuf>,
+) -> PathBuf {
+    let mut attempt = 0usize;
+    loop {
+        let filename = if attempt == 0 {
+            format!("{stem}.{ext}")
+        } else {
+            format!("{stem}-{attempt}.{ext}")
+        };
+        let candidate = folder.join(filename);
+        if !candidate.exists() && used_paths.insert(candidate.clone()) {
+            return candidate;
+        }
+        attempt += 1;
+    }
 }
 
 fn export_image(buf: ImageBuf, params: &EditParams, path: &std::path::Path) -> String {
@@ -2100,6 +2147,37 @@ mod tests {
         assert!(
             msg.contains("result.jpg"),
             "success message should contain filename: {msg}"
+        );
+    }
+
+    #[test]
+    fn gpu_preview_falls_back_to_cpu_when_denoise_is_active() {
+        assert!(gpu_supports_preview_params(&EditParams::default()));
+
+        let params = EditParams {
+            nr_luminance: 25.0,
+            ..EditParams::default()
+        };
+        assert!(!gpu_supports_preview_params(&params));
+    }
+
+    #[test]
+    fn unique_export_path_avoids_existing_and_reserved_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("photo.jpg");
+        std::fs::write(&existing, b"already here").unwrap();
+
+        let mut used = std::collections::HashSet::new();
+        let first = unique_export_path(dir.path(), "photo", "jpg", &mut used);
+        let second = unique_export_path(dir.path(), "photo", "jpg", &mut used);
+
+        assert_eq!(
+            first.file_name().and_then(|n| n.to_str()),
+            Some("photo-1.jpg")
+        );
+        assert_eq!(
+            second.file_name().and_then(|n| n.to_str()),
+            Some("photo-2.jpg")
         );
     }
 }

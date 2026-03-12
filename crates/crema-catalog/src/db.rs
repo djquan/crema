@@ -301,7 +301,7 @@ impl Catalog {
     pub fn set_rating(&self, id: PhotoId, rating: i32) -> Result<()> {
         self.conn.execute(
             "UPDATE photos SET rating = ?1 WHERE id = ?2",
-            params![rating.clamp(0, 5), id],
+            params![rating.clamp(-1, 5), id],
         )?;
         Ok(())
     }
@@ -688,7 +688,7 @@ mod tests {
 
         catalog.set_rating(id, -3).unwrap();
         let photo = catalog.get_photo(id).unwrap().unwrap();
-        assert_eq!(photo.rating, 0);
+        assert_eq!(photo.rating, -1);
     }
 
     #[test]
