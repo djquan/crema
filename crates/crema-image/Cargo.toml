@@ -3,3 +3,8 @@ name = "crema-image"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+
+[dependencies]
+image.workspace = true
+rawler.workspace = true
+heif-oxide.workspace = true

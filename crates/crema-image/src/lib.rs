@@ -1,6 +1,13 @@
 use std::fmt;
 use std::path::Path;
 
+mod decode;
+mod frame;
+mod worker;
+
+pub use frame::*;
+pub use worker::{Decoder, run_worker};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CandidateFormat {
     Raw(RawFormat),

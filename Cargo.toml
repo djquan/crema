@@ -10,3 +10,9 @@ resolver = "3"
 edition = "2024"
 license = "MIT"
 version = "0.1.0"
+
+[workspace.dependencies]
+image = { version = "=0.25.10", default-features = false, features = ["jpeg"] }
+rawler = { version = "=0.8.0", default-features = false }
+heif-oxide = "=0.1.0"
+eframe = { version = "=0.36.1", default-features = false, features = ["wgpu", "accesskit", "default_fonts", "wayland", "x11"] }

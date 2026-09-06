@@ -7,3 +7,11 @@ version.workspace = true
 [dependencies]
 crema-core = { path = "../crema-core" }
 crema-image = { path = "../crema-image" }
+eframe.workspace = true
+
+[dev-dependencies]
+image.workspace = true
+
+[[bin]]
+name = "crema"
+path = "src/main.rs"

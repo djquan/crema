@@ -29,10 +29,10 @@ impl Drop for TestDirectory {
 }
 
 fn run(arguments: &[&Path]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_crema-app"))
+    Command::new(env!("CARGO_BIN_EXE_crema-scan"))
         .args(arguments)
         .output()
-        .expect("run crema-app")
+        .expect("run crema-scan")
 }
 
 #[test]
@@ -91,13 +91,13 @@ fn prints_recognized_candidates_from_a_real_folder_without_writing() {
 fn rejects_missing_and_surplus_arguments() {
     let missing = run(&[]);
     assert!(!missing.status.success());
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("usage: crema-app <folder>"));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("usage: crema-scan <folder>"));
 
     let first = Path::new("first");
     let second = Path::new("second");
     let surplus = run(&[first, second]);
     assert!(!surplus.status.success());
-    assert!(String::from_utf8_lossy(&surplus.stderr).contains("usage: crema-app <folder>"));
+    assert!(String::from_utf8_lossy(&surplus.stderr).contains("usage: crema-scan <folder>"));
 }
 
 #[test]
