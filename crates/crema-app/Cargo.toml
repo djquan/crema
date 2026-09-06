@@ -1,0 +1,9 @@
+[package]
+name = "crema-app"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+crema-core = { path = "../crema-core" }
+crema-image = { path = "../crema-image" }

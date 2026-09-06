@@ -1,0 +1,5 @@
+[package]
+name = "crema-image"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
