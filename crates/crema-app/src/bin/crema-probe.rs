@@ -95,7 +95,7 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
     let size = PreviewSize::new(1600)?;
     for (path, candidate) in candidates {
         let started = Instant::now();
-        let outcome = decoder.decode(&path, candidate, size);
+        let outcome = decoder.decode(&path, candidate, size, &crema_image::CancelToken::new());
         let elapsed = started.elapsed().as_secs_f64() * 1000.0;
         let mut fields = vec![String::new(); 23];
         fields[0] = path.to_string_lossy().into_owned();

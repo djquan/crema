@@ -1,8 +1,13 @@
-use crate::jobs::{Event, Job, JobKey, Jobs, Purpose};
+use crate::jobs::{Event, JobKey, PreviewDemand, PreviewRequest, PreviewRuntime, Purpose};
+use crate::{metrics::Metrics, thumbnail_cache::CacheConfig};
 use crema_core::{AssetCandidate, AssetId};
 use crema_image::{CandidateFormat, DecodeOutcome, FailureClass, Provenance, SourceMetadata};
 use eframe::egui::{self, Color32, RichText, TextureHandle, TextureOptions, Vec2};
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    time::Instant,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum View {
@@ -35,6 +40,22 @@ impl Default for Workspace {
 }
 
 impl Workspace {
+    fn demand_keys(&self, visible: Vec<JobKey>) -> (Option<JobKey>, Vec<JobKey>) {
+        let selected = self.selected.map(|asset| JobKey {
+            generation: self.generation,
+            asset,
+            purpose: if self.view == View::Viewer {
+                Purpose::Viewer
+            } else {
+                Purpose::Thumbnail
+            },
+        });
+        let thumbnails = visible
+            .into_iter()
+            .filter(|key| Some(*key) != selected)
+            .collect();
+        (selected, thumbnails)
+    }
     fn insert(&mut self, generation: u64, candidate: AssetCandidate<CandidateFormat>) {
         if generation != self.generation {
             return;
@@ -170,33 +191,61 @@ fn concise_reason(reason: &str) -> String {
 pub struct Browser {
     root: PathBuf,
     workspace: Workspace,
-    jobs: Jobs,
+    jobs: PreviewRuntime,
     cache: HashMap<JobKey, Cached>,
-    last_demand: Vec<JobKey>,
     tick: u64,
     actual_pixels: bool,
     thumbnail_width: f32,
+    metrics: Metrics,
+    metric_path: Option<PathBuf>,
+    measured_selection: Option<JobKey>,
+    drawn: HashSet<Purpose>,
 }
 
 impl Browser {
     pub fn new(root: PathBuf, executable: PathBuf, context: egui::Context) -> Self {
+        Self::with_options(
+            root,
+            executable,
+            context,
+            CacheConfig::default(),
+            Metrics::default(),
+            None,
+        )
+    }
+    pub fn with_options(
+        root: PathBuf,
+        executable: PathBuf,
+        context: egui::Context,
+        cache: CacheConfig,
+        metrics: Metrics,
+        metric_path: Option<PathBuf>,
+    ) -> Self {
         context.set_visuals(egui::Visuals::dark());
         let mut style = (*context.style_of(egui::Theme::Dark)).clone();
         style.spacing.item_spacing = Vec2::new(12.0, 10.0);
         style.visuals.selection.bg_fill = Color32::from_rgb(99, 116, 93);
         style.visuals.panel_fill = Color32::from_rgb(27, 28, 27);
         context.set_style_of(egui::Theme::Dark, style);
-        let jobs = Jobs::new(executable, context);
+        let jobs = PreviewRuntime::with_options(
+            executable,
+            cache.outside_source(&root),
+            metrics.clone(),
+            move || context.request_repaint(),
+        );
         jobs.scan(root.clone(), 1);
         Self {
             root,
             workspace: Workspace::default(),
             jobs,
             cache: HashMap::new(),
-            last_demand: Vec::new(),
             tick: 0,
             actual_pixels: false,
             thumbnail_width: 220.0,
+            metrics,
+            metric_path,
+            measured_selection: None,
+            drawn: HashSet::new(),
         }
     }
 
@@ -210,7 +259,7 @@ impl Browser {
 
     fn receive(&mut self, context: &egui::Context) {
         for _ in 0..32 {
-            let Ok(event) = self.jobs.receiver.try_recv() else {
+            let Some(event) = self.jobs.try_recv() else {
                 return;
             };
             match event {
@@ -229,7 +278,9 @@ impl Browser {
                 Event::Decoded { key, outcome } if self.workspace.accepts(key) => {
                     let cached = match outcome {
                         DecodeOutcome::Decoded(result) => {
+                            self.metrics.record("gui_received", Some(key), 0, 0, 1);
                             self.evict(key.purpose, result.preview.rgba8().len());
+                            let upload_started = Instant::now();
                             let image = egui::ColorImage::from_rgba_unmultiplied(
                                 result.preview.dimensions_usize(),
                                 result.preview.rgba8(),
@@ -238,6 +289,13 @@ impl Browser {
                                 format!("{}-{:?}", key.asset, key.purpose),
                                 image,
                                 TextureOptions::LINEAR,
+                            );
+                            self.metrics.record(
+                                "texture_upload_call_us",
+                                Some(key),
+                                0,
+                                0,
+                                upload_started.elapsed().as_micros() as u64,
                             );
                             Cached::Image {
                                 texture,
@@ -299,34 +357,60 @@ impl Browser {
     }
 
     fn demand(&mut self, mut keys: Vec<JobKey>) {
-        keys.retain(|key| !self.cache.contains_key(key));
         keys.dedup();
-        if keys == self.last_demand {
-            return;
-        }
-        let jobs = keys
-            .iter()
-            .filter_map(|key| {
-                self.workspace.index.get(&key.asset).map(|index| {
-                    let candidate = &self.workspace.assets[*index];
-                    Job {
-                        key: *key,
-                        path: candidate.path().to_owned(),
-                        format: *candidate.kind(),
-                    }
-                })
+        let (selected, thumbnails) = self.workspace.demand_keys(keys);
+        let request = |key: JobKey| {
+            self.workspace.index.get(&key.asset).map(|index| {
+                let candidate = &self.workspace.assets[*index];
+                PreviewRequest {
+                    key,
+                    path: candidate.path().to_owned(),
+                    format: *candidate.kind(),
+                    needed: !self.cache.contains_key(&key),
+                }
             })
-            .collect();
-        self.jobs.replace(jobs);
-        self.last_demand = keys;
+        };
+        self.jobs.replace(PreviewDemand {
+            selected: selected.and_then(request),
+            thumbnails: thumbnails.into_iter().filter_map(request).collect(),
+        });
+    }
+
+    fn retry_key(&self) -> Option<JobKey> {
+        let asset = self.workspace.selected?;
+        let purpose = match self.workspace.view {
+            View::Grid => Purpose::Thumbnail,
+            View::Viewer => Purpose::Viewer,
+        };
+        let key = self.key(asset, purpose);
+        self.cache
+            .get(&key)
+            .is_some_and(Cached::retryable)
+            .then_some(key)
     }
 
     fn retry_selected(&mut self) {
-        if let Some(asset) = self.workspace.selected {
-            for purpose in [Purpose::Thumbnail, Purpose::Viewer] {
-                self.cache.remove(&self.key(asset, purpose));
-            }
-            self.last_demand.clear();
+        if let Some(key) = self.retry_key() {
+            self.jobs.forget(&[key]);
+            self.cache.remove(&key);
+        }
+    }
+
+    fn measure_selection(&mut self) {
+        let key = self.workspace.selected.map(|asset| {
+            self.key(
+                asset,
+                if self.workspace.view == View::Viewer {
+                    Purpose::Viewer
+                } else {
+                    Purpose::Thumbnail
+                },
+            )
+        });
+        if key != self.measured_selection {
+            self.measured_selection = key;
+            self.drawn.clear();
+            self.metrics.record("gui_selection", key, 0, 0, 1);
         }
     }
 
@@ -395,6 +479,16 @@ impl Browser {
                                                     ),
                                                     Color32::WHITE,
                                                 );
+                                                if selected && self.drawn.insert(Purpose::Thumbnail)
+                                                {
+                                                    self.metrics.record(
+                                                        "first_selected_draw",
+                                                        Some(key),
+                                                        0,
+                                                        0,
+                                                        1,
+                                                    );
+                                                }
                                             }
                                             Some(Cached::Unavailable { reason, used, .. }) => {
                                                 *used = self.tick;
@@ -433,6 +527,9 @@ impl Browser {
                                                 response = response.on_hover_text(&reason);
                                                 format!("{filename}. Preview unavailable. {reason}")
                                             }
+                                            None if !self.cache.contains_key(&key) => {
+                                                format!("{filename}. Loading preview")
+                                            }
                                             None => filename.clone(),
                                         };
                                         response.widget_info(|| {
@@ -453,10 +550,12 @@ impl Browser {
                                 .inner;
                             if response.clicked() {
                                 self.workspace.selected = Some(id);
+                                self.measure_selection();
                             }
                             if response.double_clicked() {
                                 self.workspace.selected = Some(id);
                                 self.workspace.view = View::Viewer;
+                                self.measure_selection();
                             }
                         }
                     });
@@ -525,11 +624,15 @@ impl Browser {
                         ui.add(egui::Image::new((texture.id(), source * scale)));
                     });
                 }
+                if self.drawn.insert(display_key.purpose) {
+                    self.metrics
+                        .record("first_selected_draw", Some(display_key), 0, 0, 1);
+                }
             }
             Some(Cached::Unavailable { reason, used, .. }) => {
                 *used = self.tick;
                 ui.centered_and_justified(|ui| {
-                    ui.label(reason.as_str());
+                    ui.label(concise_reason(reason));
                 });
             }
             None => {
@@ -543,6 +646,16 @@ impl Browser {
 }
 
 impl eframe::App for Browser {
+    fn on_exit(&mut self) {
+        self.jobs.shutdown();
+        if let Some(path) = self.metric_path.take() {
+            self.metrics.record("gui_exit", None, 0, 0, 1);
+            if let Err(error) = self.metrics.save(&path) {
+                eprintln!("metrics {}: {error}", path.display());
+            }
+        }
+    }
+
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.receive(context);
     }
@@ -565,15 +678,7 @@ impl eframe::App for Browser {
                 {
                     self.workspace.view = View::Viewer;
                 }
-                let can_retry = self.workspace.selected.is_some_and(|asset| {
-                    [Purpose::Thumbnail, Purpose::Viewer]
-                        .into_iter()
-                        .any(|purpose| {
-                            self.cache
-                                .get(&self.key(asset, purpose))
-                                .is_some_and(Cached::retryable)
-                        })
-                });
+                let can_retry = self.retry_key().is_some();
                 if can_retry && ui.button("Retry selected preview").clicked() {
                     self.retry_selected();
                 }
@@ -644,6 +749,7 @@ impl eframe::App for Browser {
                 self.demand(Vec::new());
                 return;
             }
+            self.measure_selection();
             let demands = match self.workspace.view {
                 View::Grid => self.grid(ui),
                 View::Viewer => self.viewer(ui),
@@ -783,7 +889,10 @@ mod tests {
     #[test]
     fn larger_preview_failure_preserves_thumbnail_and_retry_clears_only_selection() {
         let context = egui::Context::default();
-        let jobs = Jobs::new(std::env::current_exe().unwrap(), context.clone());
+        let wake = context.clone();
+        let jobs = PreviewRuntime::new(std::env::current_exe().unwrap(), move || {
+            wake.request_repaint()
+        });
         let asset = test_asset();
         let mut browser = Browser {
             root: PathBuf::new(),
@@ -793,10 +902,13 @@ mod tests {
             },
             jobs,
             cache: HashMap::new(),
-            last_demand: Vec::new(),
             tick: 0,
             actual_pixels: false,
             thumbnail_width: 220.0,
+            metrics: Metrics::default(),
+            metric_path: None,
+            measured_selection: None,
+            drawn: HashSet::new(),
         };
         let thumbnail = browser.key(asset, Purpose::Thumbnail);
         let viewer = browser.key(asset, Purpose::Viewer);
@@ -838,7 +950,6 @@ mod tests {
                 used: 0,
             },
         );
-        browser.last_demand.push(viewer);
         assert_eq!(
             viewer_display_key(&browser.cache, viewer, thumbnail),
             thumbnail
@@ -849,12 +960,49 @@ mod tests {
             unavailable_to_evict(&browser.cache, Purpose::Thumbnail, 0),
             None
         );
+        assert_eq!(
+            browser.retry_key(),
+            None,
+            "grid must not offer retry for a viewer failure"
+        );
+        browser.retry_selected();
+        assert!(browser.cache.contains_key(&viewer));
+        browser.workspace.view = View::Viewer;
+        assert_eq!(browser.retry_key(), Some(viewer));
         browser.retry_selected();
         assert!(!browser.cache.contains_key(&viewer));
-        assert!(!browser.cache.contains_key(&thumbnail));
+        assert!(
+            browser.cache.contains_key(&thumbnail),
+            "retry must preserve the valid thumbnail"
+        );
         assert!(browser.cache.contains_key(&other));
-        assert!(browser.last_demand.is_empty());
         assert_eq!(browser.workspace.selected, Some(asset));
+        let image = browser.cache.remove(&thumbnail).unwrap();
+        browser.cache.insert(viewer, image);
+        browser.cache.insert(thumbnail, unavailable(3));
+        assert_eq!(
+            browser.retry_key(),
+            None,
+            "viewer must not offer retry for a thumbnail failure"
+        );
+        browser.retry_selected();
+        assert!(browser.cache.contains_key(&thumbnail));
+        browser.workspace.view = View::Grid;
+        assert_eq!(browser.retry_key(), Some(thumbnail));
+        browser.retry_selected();
+        assert!(
+            browser.cache.contains_key(&viewer),
+            "retry must preserve the valid viewer"
+        );
+        assert!(!browser.cache.contains_key(&thumbnail));
+        browser.cache.insert(thumbnail, unavailable(4));
+        browser.cache.insert(viewer, unavailable(5));
+        browser.retry_selected();
+        assert!(!browser.cache.contains_key(&thumbnail));
+        assert!(
+            browser.cache.contains_key(&viewer),
+            "retry only invalidates the current view's purpose"
+        );
     }
 
     #[test]
@@ -895,20 +1043,88 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn offscreen_selection_is_demanded_independently_of_visible_rows() {
+        let asset = test_asset();
+        let workspace = Workspace {
+            selected: Some(asset),
+            ..Workspace::default()
+        };
+        let (selected, thumbnails) = workspace.demand_keys(Vec::new());
+        assert_eq!(
+            selected,
+            Some(JobKey {
+                generation: 1,
+                asset,
+                purpose: Purpose::Thumbnail
+            })
+        );
+        assert!(thumbnails.is_empty());
+    }
 
+    #[test]
+    fn on_exit_saves_configured_metrics_once_without_overwriting() {
+        let root = std::env::temp_dir().join(format!("crema-gui-exit-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        for existing in [false, true] {
+            let path = root.join(if existing {
+                "existing.tsv"
+            } else {
+                "fresh.tsv"
+            });
+            if existing {
+                fs::write(&path, b"existing user metrics").unwrap();
+            }
+            let metrics = Metrics::new(true);
+            metrics.record("gui_launch", None, 0, 0, 1);
+            let mut browser = Browser::with_options(
+                root.clone(),
+                std::env::current_exe().unwrap(),
+                egui::Context::default(),
+                CacheConfig {
+                    root: None,
+                    budget: 0,
+                },
+                metrics.clone(),
+                Some(path.clone()),
+            );
+            eframe::App::on_exit(&mut browser);
+            assert!(
+                path.exists(),
+                "native on_exit must save configured GUI metrics"
+            );
+            let saved = fs::read(&path).unwrap();
+            if existing {
+                assert_eq!(saved, b"existing user metrics");
+            } else {
+                assert!(String::from_utf8_lossy(&saved).contains("\tgui_launch\t"));
+            }
+            metrics.record("after_exit", None, 0, 0, 1);
+            eframe::App::on_exit(&mut browser);
+            assert_eq!(fs::read(&path).unwrap(), saved);
+            drop(browser);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn idle_logic_does_not_request_repaint() {
         let context = egui::Context::default();
-        let jobs = Jobs::new(std::env::current_exe().unwrap(), context.clone());
+        let wake = context.clone();
+        let jobs = PreviewRuntime::new(std::env::current_exe().unwrap(), move || {
+            wake.request_repaint()
+        });
         let mut browser = Browser {
             root: PathBuf::new(),
             workspace: Workspace::default(),
             jobs,
             cache: HashMap::new(),
-            last_demand: Vec::new(),
             tick: 0,
             actual_pixels: false,
             thumbnail_width: 220.0,
+            metrics: Metrics::default(),
+            metric_path: None,
+            measured_selection: None,
+            drawn: HashSet::new(),
         };
         let count = Arc::new(AtomicUsize::new(0));
         let observed = count.clone();

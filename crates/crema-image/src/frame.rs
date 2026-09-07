@@ -58,7 +58,7 @@ pub struct PreviewPixels {
 }
 
 impl PreviewPixels {
-    pub(crate) fn new(
+    pub fn new(
         width: u32,
         height: u32,
         rgba8: Vec<u8>,

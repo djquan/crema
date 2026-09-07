@@ -34,17 +34,31 @@ fn main() -> ExitCode {
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
-    match eframe::run_native(
+    let metric_path = std::env::var_os("CREMA_METRICS").map(PathBuf::from);
+    let metrics = crema_app::metrics::Metrics::new(metric_path.is_some());
+    metrics.record("gui_launch", None, 0, 0, 1);
+    let mut cache = crema_app::thumbnail_cache::CacheConfig::default();
+    if let Some(root) = std::env::var_os("CREMA_CACHE_ROOT") {
+        cache.root = Some(PathBuf::from(root));
+    }
+    if std::env::var_os("CREMA_CACHE_DISABLED").is_some() {
+        cache.root = None;
+    }
+    let result = eframe::run_native(
         "Crema",
         options,
         Box::new(move |context| {
-            Ok(Box::new(crema_app::Browser::new(
+            Ok(Box::new(crema_app::Browser::with_options(
                 PathBuf::from(root),
                 executable,
                 context.egui_ctx.clone(),
+                cache,
+                metrics,
+                metric_path,
             )))
         }),
-    ) {
+    );
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");

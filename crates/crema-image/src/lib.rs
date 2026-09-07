@@ -6,7 +6,7 @@ mod frame;
 mod worker;
 
 pub use frame::*;
-pub use worker::{Decoder, run_worker};
+pub use worker::{CancelToken, DecodeEvent, Decoder, run_worker};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CandidateFormat {

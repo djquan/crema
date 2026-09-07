@@ -8,8 +8,6 @@ version.workspace = true
 crema-core = { path = "../crema-core" }
 crema-image = { path = "../crema-image" }
 eframe.workspace = true
-
-[dev-dependencies]
 image.workspace = true
 
 [[bin]]

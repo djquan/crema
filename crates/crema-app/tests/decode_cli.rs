@@ -106,6 +106,7 @@ fn real_worker_rejects_truncated_input_then_a_fresh_worker_reports_codec_failure
             &source,
             CandidateFormat::Raw(RawFormat::Orf),
             PreviewSize::new(16).unwrap(),
+            &crema_image::CancelToken::new(),
         );
         assert!(matches!(outcome, DecodeOutcome::Failed(_)));
     }

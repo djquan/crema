@@ -1,14 +1,17 @@
+use crate::{
+    metrics::{Metrics, Span},
+    preview::PreviewEngine,
+    thumbnail_cache::CacheConfig,
+};
 use crema_core::{AssetCandidate, AssetId, ScanEvent, scan_folder};
 use crema_image::{
-    CandidateFormat, DecodeLimits, DecodeOutcome, Decoder, PreviewSize, classify_candidate,
+    CancelToken, CandidateFormat, DecodeOutcome, FailureClass, PreviewSize, classify_candidate,
 };
-use eframe::egui;
 use std::{
-    collections::VecDeque,
+    collections::HashMap,
     path::PathBuf,
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
@@ -16,12 +19,12 @@ use std::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum Purpose {
+pub enum Purpose {
     Thumbnail,
     Viewer,
 }
 impl Purpose {
-    fn size(self) -> PreviewSize {
+    pub fn size(self) -> PreviewSize {
         PreviewSize::new(match self {
             Self::Thumbnail => 320,
             Self::Viewer => 4096,
@@ -29,21 +32,29 @@ impl Purpose {
         .expect("fixed preview size")
     }
 }
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct JobKey {
+pub struct JobKey {
     pub generation: u64,
     pub asset: AssetId,
     pub purpose: Purpose,
 }
-
-pub(crate) struct Job {
+#[derive(Clone, Debug)]
+pub struct PreviewRequest {
     pub key: JobKey,
     pub path: PathBuf,
     pub format: CandidateFormat,
+    pub needed: bool,
 }
-
-pub(crate) enum Event {
+#[derive(Default)]
+pub struct PreviewDemand {
+    pub selected: Option<PreviewRequest>,
+    pub thumbnails: Vec<PreviewRequest>,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InterestId(pub u64);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AttemptId(pub u64);
+pub enum Event {
     Candidate {
         generation: u64,
         candidate: AssetCandidate<CandidateFormat>,
@@ -57,112 +68,402 @@ pub(crate) enum Event {
         outcome: DecodeOutcome,
     },
 }
-
+struct Interest {
+    id: InterestId,
+    request: PreviewRequest,
+    done: bool,
+    attempt: Option<AttemptId>,
+}
+#[derive(Clone)]
+struct Attempt {
+    key: JobKey,
+    interest: InterestId,
+    id: AttemptId,
+    selected: bool,
+    cancel: CancelToken,
+}
+struct Completion {
+    attempt: Attempt,
+    event: Event,
+}
 #[derive(Default)]
-struct Demand {
-    queue: VecDeque<Job>,
-    active: Option<JobKey>,
+struct State {
+    stopping: bool,
+    next_interest: u64,
+    next_attempt: u64,
+    interests: HashMap<JobKey, Interest>,
+    order: Vec<JobKey>,
+    selected: Option<JobKey>,
+    active: Option<Attempt>,
+    selected_ready: Option<Completion>,
+    thumbnail_ready: Option<Completion>,
 }
-
-pub(crate) struct Jobs {
-    pub receiver: Receiver<Event>,
-    sender: SyncSender<Event>,
-    demand: Arc<(Mutex<Demand>, Condvar)>,
-    stopped: Arc<AtomicBool>,
-    decoder: Arc<Decoder>,
-    worker: Option<JoinHandle<()>>,
-    context: egui::Context,
-}
-
-fn publish(
-    sender: &SyncSender<Event>,
-    mut event: Event,
-    context: &egui::Context,
-    stopped: &AtomicBool,
-) -> bool {
-    loop {
-        if stopped.load(Ordering::Acquire) {
-            return false;
+impl State {
+    fn current(&self, attempt: &Attempt) -> bool {
+        !self.stopping
+            && self.interests.get(&attempt.key).is_some_and(|interest| {
+                interest.id == attempt.interest && interest.attempt == Some(attempt.id)
+            })
+    }
+    fn pending_selected(&self) -> bool {
+        self.selected
+            .and_then(|key| self.interests.get(&key))
+            .is_some_and(|interest| !interest.done && interest.request.needed)
+    }
+    fn replace(&mut self, demand: PreviewDemand) {
+        self.selected = demand.selected.as_ref().map(|request| request.key);
+        self.order.clear();
+        for request in demand.selected.into_iter().chain(demand.thumbnails) {
+            if self.order.contains(&request.key) {
+                continue;
+            }
+            self.order.push(request.key);
+            match self.interests.get_mut(&request.key) {
+                Some(interest) => {
+                    if !interest.request.needed && request.needed {
+                        interest.done = false;
+                    }
+                    interest.request = request;
+                }
+                None => {
+                    self.next_interest += 1;
+                    self.interests.insert(
+                        request.key,
+                        Interest {
+                            id: InterestId(self.next_interest),
+                            done: !request.needed,
+                            request,
+                            attempt: None,
+                        },
+                    );
+                }
+            }
         }
-        match sender.try_send(event) {
-            Ok(()) => {
-                context.request_repaint();
-                return true;
-            }
-            Err(TrySendError::Disconnected(_)) => return false,
-            Err(TrySendError::Full(value)) => {
-                event = value;
-                thread::sleep(Duration::from_millis(2));
-            }
+        self.interests.retain(|key, _| self.order.contains(key));
+        if self
+            .selected_ready
+            .as_ref()
+            .is_some_and(|ready| Some(ready.attempt.key) != self.selected)
+            && let Some(ready) = self.selected_ready.take()
+            && let Some(interest) = self.interests.get_mut(&ready.attempt.key)
+        {
+            interest.done = false;
+        }
+        if self
+            .selected_ready
+            .as_ref()
+            .is_some_and(|ready| !self.current(&ready.attempt))
+        {
+            self.selected_ready = None;
+        }
+        if self
+            .thumbnail_ready
+            .as_ref()
+            .is_some_and(|ready| !self.current(&ready.attempt))
+        {
+            self.thumbnail_ready = None;
+        }
+        if let Some(active) = &self.active
+            && (!self.current(active)
+                || (self.pending_selected() && self.selected != Some(active.key)))
+        {
+            active.cancel.cancel();
         }
     }
+    fn take(&mut self) -> Option<(Attempt, PreviewRequest)> {
+        let key = *self.order.iter().find(|key| {
+            self.interests
+                .get(key)
+                .is_some_and(|interest| !interest.done && interest.request.needed)
+        })?;
+        let interest = self.interests.get_mut(&key).expect("ordered interest");
+        self.next_attempt += 1;
+        let attempt = Attempt {
+            key,
+            interest: interest.id,
+            id: AttemptId(self.next_attempt),
+            selected: self.selected == Some(key),
+            cancel: CancelToken::new(),
+        };
+        interest.attempt = Some(attempt.id);
+        self.active = Some(attempt.clone());
+        Some((attempt, interest.request.clone()))
+    }
 }
-
-impl Jobs {
-    pub fn new(executable: PathBuf, context: egui::Context) -> Self {
-        let (sender, receiver) = mpsc::sync_channel(2);
-        let demand = Arc::new((Mutex::new(Demand::default()), Condvar::new()));
-        let stopped = Arc::new(AtomicBool::new(false));
-        let decoder = Arc::new(Decoder::new(executable, DecodeLimits::default()));
+type Shared = Arc<(Mutex<State>, Condvar)>;
+type Wake = Arc<dyn Fn() + Send + Sync>;
+pub struct PreviewRuntime {
+    scan_receiver: Receiver<Event>,
+    scan_sender: SyncSender<Event>,
+    state: Shared,
+    worker: Option<JoinHandle<()>>,
+    wake: Wake,
+    metrics: Metrics,
+}
+fn admit(
+    shared: &Shared,
+    attempt: &Attempt,
+    purpose: Purpose,
+    outcome: DecodeOutcome,
+    terminal: bool,
+    wake: &Wake,
+    span: &Span,
+) -> bool {
+    let mut state = shared.0.lock().expect("preview state");
+    if matches!(&outcome, DecodeOutcome::Failed(error) if error.class == FailureClass::Cancelled) {
+        return false;
+    }
+    loop {
+        if !state.current(attempt) || attempt.cancel.is_cancelled() {
+            span.record("obsolete_drop", 1);
+            return false;
+        }
+        let occupied = if attempt.selected {
+            state.selected_ready.is_some()
+        } else {
+            state.thumbnail_ready.is_some()
+        };
+        if !occupied {
+            break;
+        }
+        if !attempt.selected && state.pending_selected() {
+            span.record("priority_drop", 1);
+            return false;
+        }
+        span.record("admission_wait", 1);
+        state = shared.1.wait(state).expect("preview admission");
+    }
+    let output_span = Span {
+        key: JobKey {
+            purpose,
+            ..span.key
+        },
+        ..span.clone()
+    };
+    output_span.record(
+        if matches!(&outcome, DecodeOutcome::Decoded(_)) {
+            if purpose == Purpose::Viewer {
+                "viewer_ready"
+            } else {
+                "thumbnail_ready"
+            }
+        } else {
+            "preview_failed"
+        },
+        1,
+    );
+    let completion = Completion {
+        attempt: attempt.clone(),
+        event: Event::Decoded {
+            key: JobKey {
+                purpose,
+                ..attempt.key
+            },
+            outcome,
+        },
+    };
+    if attempt.selected {
+        state.selected_ready = Some(completion);
+    } else {
+        state.thumbnail_ready = Some(completion);
+    }
+    state
+        .interests
+        .get_mut(&attempt.key)
+        .expect("current interest")
+        .done = terminal;
+    drop(state);
+    wake();
+    true
+}
+impl PreviewRuntime {
+    pub fn new(executable: PathBuf, wake: impl Fn() + Send + Sync + 'static) -> Self {
+        Self::with_options(executable, CacheConfig::default(), Metrics::default(), wake)
+    }
+    pub fn with_options(
+        executable: PathBuf,
+        cache: CacheConfig,
+        metrics: Metrics,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        let (scan_sender, scan_receiver) = mpsc::sync_channel(32);
+        let state = Arc::new((Mutex::new(State::default()), Condvar::new()));
+        let wake: Wake = Arc::new(wake);
         let worker = {
-            let (demand, stopped, decoder, sender, context) = (
-                demand.clone(),
-                stopped.clone(),
-                decoder.clone(),
-                sender.clone(),
-                context.clone(),
-            );
+            let (shared, wake, metrics) = (state.clone(), wake.clone(), metrics.clone());
             thread::spawn(move || {
+                let engine = PreviewEngine::new(executable, cache);
                 loop {
-                    let job = {
-                        let (mutex, changed) = &*demand;
-                        let mut state = mutex.lock().expect("demand lock");
-                        while state.queue.is_empty() && !stopped.load(Ordering::Acquire) {
-                            state = changed.wait(state).expect("demand wait");
+                    let (attempt, request) = {
+                        let mut state = shared.0.lock().expect("preview state");
+                        loop {
+                            if state.stopping {
+                                return;
+                            }
+                            if let Some(work) = state.take() {
+                                break work;
+                            }
+                            state = shared.1.wait(state).expect("preview demand");
                         }
-                        if stopped.load(Ordering::Acquire) {
-                            break;
-                        }
-                        let job = state.queue.pop_front().expect("nonempty demand");
-                        state.active = Some(job.key);
-                        job
                     };
-                    let outcome = decoder.decode(&job.path, job.format, job.key.purpose.size());
-                    if !publish(
-                        &sender,
-                        Event::Decoded {
-                            key: job.key,
-                            outcome,
+                    let span = Span {
+                        metrics: metrics.clone(),
+                        key: attempt.key,
+                        interest: attempt.interest.0,
+                        attempt: attempt.id.0,
+                    };
+                    span.record("attempt_started", 1);
+                    engine.run(
+                        &request,
+                        &attempt.cancel,
+                        &span,
+                        |purpose, outcome, terminal| {
+                            admit(&shared, &attempt, purpose, outcome, terminal, &wake, &span)
                         },
-                        &context,
-                        &stopped,
-                    ) {
-                        break;
+                    );
+                    span.record(
+                        if attempt.cancel.is_cancelled() {
+                            "attempt_cancelled"
+                        } else {
+                            "attempt_finished"
+                        },
+                        1,
+                    );
+                    let mut state = shared.0.lock().expect("preview state");
+                    if state
+                        .active
+                        .as_ref()
+                        .is_some_and(|active| active.id == attempt.id)
+                    {
+                        state.active = None;
                     }
-                    let mut state = demand.0.lock().expect("demand lock");
-                    state.queue.retain(|queued| queued.key != job.key);
-                    state.active = None;
                 }
             })
         };
         Self {
-            receiver,
-            sender,
-            demand,
-            stopped,
-            decoder,
+            scan_receiver,
+            scan_sender,
+            state,
             worker: Some(worker),
-            context,
+            wake,
+            metrics,
         }
     }
-
+    pub fn replace(&self, demand: PreviewDemand) {
+        let mut state = self.state.0.lock().expect("preview state");
+        let before = state.next_interest;
+        let buffered = [
+            state.selected_ready.as_ref(),
+            state.thumbnail_ready.as_ref(),
+        ]
+        .map(|ready| ready.map(|ready| ready.attempt.clone()));
+        let was_cancelled = state
+            .active
+            .as_ref()
+            .is_some_and(|active| active.cancel.is_cancelled());
+        state.replace(demand);
+        for attempt in buffered.into_iter().flatten() {
+            if ![
+                state.selected_ready.as_ref(),
+                state.thumbnail_ready.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|ready| ready.attempt.id == attempt.id)
+            {
+                self.metrics.record(
+                    if state.current(&attempt) {
+                        "priority_drop"
+                    } else {
+                        "obsolete_drop"
+                    },
+                    Some(attempt.key),
+                    attempt.interest.0,
+                    attempt.id.0,
+                    1,
+                );
+            }
+        }
+        for interest in state
+            .interests
+            .values()
+            .filter(|interest| interest.id.0 > before)
+        {
+            self.metrics.record(
+                "interest_requested",
+                Some(interest.request.key),
+                interest.id.0,
+                0,
+                1,
+            );
+        }
+        if !was_cancelled
+            && let Some(active) = &state.active
+            && active.cancel.is_cancelled()
+        {
+            self.metrics.record(
+                "cancel_requested",
+                Some(active.key),
+                active.interest.0,
+                active.id.0,
+                1,
+            );
+        }
+        self.state.1.notify_all();
+    }
+    pub fn forget(&self, keys: &[JobKey]) {
+        let mut state = self.state.0.lock().expect("preview state");
+        for key in keys {
+            state.interests.remove(key);
+        }
+        if let Some(active) = &state.active
+            && !state.current(active)
+        {
+            active.cancel.cancel();
+        }
+        self.state.1.notify_all();
+    }
+    pub fn try_recv(&self) -> Option<Event> {
+        let mut state = self.state.0.lock().expect("preview state");
+        for selected in [true, false] {
+            let ready = if selected {
+                state.selected_ready.take()
+            } else {
+                state.thumbnail_ready.take()
+            };
+            if let Some(ready) = ready {
+                self.state.1.notify_all();
+                if state.current(&ready.attempt) {
+                    return Some(ready.event);
+                }
+            }
+        }
+        drop(state);
+        self.scan_receiver.try_recv().ok()
+    }
     pub fn scan(&self, root: PathBuf, generation: u64) {
-        let (sender, context, stopped) = (
-            self.sender.clone(),
-            self.context.clone(),
-            self.stopped.clone(),
+        let (sender, shared, wake) = (
+            self.scan_sender.clone(),
+            self.state.clone(),
+            self.wake.clone(),
         );
         thread::spawn(move || {
+            let publish = |mut event| loop {
+                if shared.0.lock().expect("preview state").stopping {
+                    return false;
+                }
+                match sender.try_send(event) {
+                    Ok(()) => {
+                        wake();
+                        return true;
+                    }
+                    Err(TrySendError::Disconnected(_)) => return false,
+                    Err(TrySendError::Full(returned)) => {
+                        event = returned;
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                }
+            };
             let mut failures = Vec::new();
             match scan_folder(root, classify_candidate) {
                 Err(error) => failures.push(error.to_string()),
@@ -170,15 +471,10 @@ impl Jobs {
                     for event in scan {
                         match event {
                             ScanEvent::Candidate(candidate) => {
-                                if !publish(
-                                    &sender,
-                                    Event::Candidate {
-                                        generation,
-                                        candidate,
-                                    },
-                                    &context,
-                                    &stopped,
-                                ) {
+                                if !publish(Event::Candidate {
+                                    generation,
+                                    candidate,
+                                }) {
                                     return;
                                 }
                             }
@@ -191,35 +487,254 @@ impl Jobs {
                     }
                 }
             }
-            publish(
-                &sender,
-                Event::ScanFinished {
-                    generation,
-                    failures,
-                },
-                &context,
-                &stopped,
-            );
+            publish(Event::ScanFinished {
+                generation,
+                failures,
+            });
         });
     }
-
-    pub fn replace(&self, jobs: Vec<Job>) {
-        let mut state = self.demand.0.lock().expect("demand lock");
-        state.queue = jobs
-            .into_iter()
-            .filter(|job| Some(job.key) != state.active)
-            .collect();
-        self.demand.1.notify_one();
-    }
 }
-
-impl Drop for Jobs {
-    fn drop(&mut self) {
-        self.stopped.store(true, Ordering::Release);
-        self.decoder.cancel();
-        self.demand.1.notify_one();
+impl PreviewRuntime {
+    pub fn shutdown(&mut self) {
+        {
+            let mut state = self.state.0.lock().expect("preview state");
+            state.stopping = true;
+            state.interests.clear();
+            state.selected_ready = None;
+            state.thumbnail_ready = None;
+            if let Some(active) = &state.active {
+                if !active.cancel.is_cancelled() {
+                    self.metrics.record(
+                        "cancel_requested",
+                        Some(active.key),
+                        active.interest.0,
+                        active.id.0,
+                        1,
+                    );
+                }
+                active.cancel.cancel();
+            }
+            self.state.1.notify_all();
+        }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+    }
+}
+impl Drop for PreviewRuntime {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn request(generation: u64, purpose: Purpose) -> PreviewRequest {
+        let root = std::env::temp_dir().join(format!(
+            "crema-scheduler-{}-{:?}",
+            std::process::id(),
+            thread::current().id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("photo.jpg");
+        if !path.exists() {
+            std::fs::write(&path, []).unwrap();
+        }
+        let ScanEvent::Candidate(candidate) = scan_folder(&root, classify_candidate)
+            .unwrap()
+            .next()
+            .unwrap()
+        else {
+            panic!("candidate");
+        };
+        PreviewRequest {
+            key: JobKey {
+                generation,
+                asset: candidate.id(),
+                purpose,
+            },
+            path,
+            format: *candidate.kind(),
+            needed: true,
+        }
+    }
+    #[test]
+    fn aba_preserves_new_interest_and_preempted_thumbnail_resumes() {
+        let a = request(1, Purpose::Thumbnail);
+        let b = request(2, Purpose::Viewer);
+        let mut state = State::default();
+        state.replace(PreviewDemand {
+            thumbnails: vec![a.clone()],
+            ..Default::default()
+        });
+        let (a1, _) = state.take().unwrap();
+        state.replace(PreviewDemand {
+            selected: Some(b.clone()),
+            thumbnails: vec![a.clone()],
+        });
+        assert!(a1.cancel.is_cancelled());
+        assert_eq!(state.interests[&a.key].id, a1.interest);
+        let (b1, _) = state.take().unwrap();
+        state.interests.get_mut(&b.key).unwrap().done = true;
+        let (a2, _) = state.take().unwrap();
+        assert_eq!(a1.interest, a2.interest);
+        assert_ne!(a1.id, a2.id);
+        state.replace(PreviewDemand {
+            selected: Some(b),
+            ..Default::default()
+        });
+        state.replace(PreviewDemand {
+            selected: Some(a.clone()),
+            ..Default::default()
+        });
+        let (a3, _) = state.take().unwrap();
+        assert_ne!(a1.interest, a3.interest);
+        assert!(!state.current(&a1));
+        assert!(!state.current(&a2));
+        assert!(!state.current(&b1));
+        assert!(state.current(&a3));
+        std::fs::remove_dir_all(a.path.parent().unwrap()).unwrap();
+    }
+    #[test]
+    fn removed_interest_never_publishes_its_old_completion() {
+        let request = request(1, Purpose::Thumbnail);
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut bytes)
+            .encode(
+                &vec![90; 3000 * 3000 * 3],
+                3000,
+                3000,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        std::fs::write(&request.path, bytes).unwrap();
+        let jobs = PreviewRuntime::new(std::env::current_exe().unwrap(), || {});
+        jobs.replace(PreviewDemand {
+            thumbnails: vec![request.clone()],
+            ..Default::default()
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while jobs.state.0.lock().unwrap().active.is_none() {
+            assert!(std::time::Instant::now() < deadline);
+            thread::yield_now();
+        }
+        jobs.replace(PreviewDemand::default());
+        while jobs.state.0.lock().unwrap().active.is_some() {
+            assert!(std::time::Instant::now() < deadline);
+            thread::yield_now();
+        }
+        assert!(
+            jobs.try_recv().is_none(),
+            "removed interest delivered stale completion"
+        );
+        drop(jobs);
+        std::fs::remove_dir_all(request.path.parent().unwrap()).unwrap();
+    }
+    #[test]
+    fn selected_slot_drains_first_and_idle_shutdown_joins() {
+        let a = request(1, Purpose::Thumbnail);
+        let b = request(2, Purpose::Viewer);
+        let jobs = PreviewRuntime::new(std::env::current_exe().unwrap(), || {});
+        let mut state = jobs.state.0.lock().unwrap();
+        state.replace(PreviewDemand {
+            selected: Some(b.clone()),
+            thumbnails: vec![a.clone()],
+        });
+        for request in [&b, &a] {
+            let (attempt, _) = state.take().unwrap();
+            state.interests.get_mut(&request.key).unwrap().done = true;
+            let completion = Completion {
+                attempt,
+                event: Event::Decoded {
+                    key: request.key,
+                    outcome: DecodeOutcome::Unsupported("test state".into()),
+                },
+            };
+            if request.key == b.key {
+                state.selected_ready = Some(completion);
+            } else {
+                state.thumbnail_ready = Some(completion);
+            }
+        }
+        drop(state);
+        assert!(matches!(jobs.try_recv(), Some(Event::Decoded { key, .. }) if key == b.key));
+        assert!(matches!(jobs.try_recv(), Some(Event::Decoded { key, .. }) if key == a.key));
+        drop(jobs);
+        std::fs::remove_dir_all(a.path.parent().unwrap()).unwrap();
+    }
+    #[test]
+    fn previous_selected_completion_cannot_occupy_new_selected_slot() {
+        let a = request(1, Purpose::Thumbnail);
+        let b = request(2, Purpose::Viewer);
+        let mut state = State::default();
+        state.replace(PreviewDemand {
+            selected: Some(a.clone()),
+            ..Default::default()
+        });
+        let (attempt, _) = state.take().unwrap();
+        state.interests.get_mut(&a.key).unwrap().done = true;
+        state.selected_ready = Some(Completion {
+            attempt,
+            event: Event::Decoded {
+                key: a.key,
+                outcome: DecodeOutcome::Unsupported("pure completion state".into()),
+            },
+        });
+        state.replace(PreviewDemand {
+            selected: Some(b),
+            thumbnails: vec![a.clone()],
+        });
+        assert!(
+            state.selected_ready.is_none(),
+            "old selected thumbnail cannot block the new selection"
+        );
+        assert!(!state.interests[&a.key].done);
+        std::fs::remove_dir_all(a.path.parent().unwrap()).unwrap();
+    }
+    #[test]
+    fn cached_selection_preserves_visible_work_but_removed_work_still_cancels() {
+        let a = request(1, Purpose::Thumbnail);
+        let mut b = request(2, Purpose::Thumbnail);
+        b.needed = false;
+        let mut state = State::default();
+        state.replace(PreviewDemand {
+            selected: Some(a.clone()),
+            ..Default::default()
+        });
+        let (active, _) = state.take().unwrap();
+        state.replace(PreviewDemand {
+            selected: Some(b.clone()),
+            thumbnails: vec![a.clone()],
+        });
+        assert!(
+            !active.cancel.is_cancelled(),
+            "cached selection must preserve still-desired visible work"
+        );
+        assert_eq!(state.interests[&a.key].id, active.interest);
+        assert!(state.interests[&b.key].done);
+        state.replace(PreviewDemand {
+            selected: Some(b.clone()),
+            ..Default::default()
+        });
+        assert!(
+            active.cancel.is_cancelled(),
+            "removed thumbnail must cancel"
+        );
+        let mut viewer = a.clone();
+        viewer.key.purpose = Purpose::Viewer;
+        state.replace(PreviewDemand {
+            selected: Some(viewer),
+            ..Default::default()
+        });
+        let (active_viewer, _) = state.take().unwrap();
+        state.replace(PreviewDemand {
+            selected: Some(b),
+            thumbnails: vec![a.clone()],
+        });
+        assert!(
+            active_viewer.cancel.is_cancelled(),
+            "obsolete viewer must cancel even when its successor is cached"
+        );
+        std::fs::remove_dir_all(a.path.parent().unwrap()).unwrap();
     }
 }

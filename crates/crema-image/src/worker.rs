@@ -5,7 +5,7 @@ use std::{
     io::{Cursor, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::mpsc,
+    sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -15,23 +15,36 @@ const RESPONSE: &[u8; 8] = b"CREMARES";
 const META_CAP: usize = 64 * 1024;
 const STRING_CAP: usize = 4096;
 
+#[derive(Clone, Default)]
+pub struct CancelToken(Arc<AtomicBool>);
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum DecodeEvent {
+    SourceRead(u64),
+    WorkerSpawned(u32),
+    WorkerReaped(u32),
+}
+
 pub struct Decoder {
     executable: PathBuf,
     limits: DecodeLimits,
-    cancelled: AtomicBool,
 }
 
 impl Decoder {
     pub fn new(executable: PathBuf, limits: DecodeLimits) -> Self {
-        Self {
-            executable,
-            limits,
-            cancelled: AtomicBool::new(false),
-        }
-    }
-
-    pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        Self { executable, limits }
     }
 
     pub fn decode(
@@ -39,6 +52,27 @@ impl Decoder {
         path: &Path,
         candidate: CandidateFormat,
         size: PreviewSize,
+        cancel: &CancelToken,
+    ) -> DecodeOutcome {
+        if cancel.is_cancelled() {
+            return DecodeOutcome::Failed(DecodeError::new(
+                FailureClass::Cancelled,
+                "decode cancelled",
+            ));
+        }
+        match File::open(path) {
+            Ok(mut file) => self.decode_opened(&mut file, candidate, size, cancel, &|_| {}),
+            Err(error) => DecodeOutcome::Failed(error.into()),
+        }
+    }
+
+    pub fn decode_opened(
+        &self,
+        file: &mut File,
+        candidate: CandidateFormat,
+        size: PreviewSize,
+        cancel: &CancelToken,
+        observe: &dyn Fn(DecodeEvent),
     ) -> DecodeOutcome {
         let codec = match candidate {
             CandidateFormat::Raster(RasterFormat::Jpeg) => 0,
@@ -47,18 +81,38 @@ impl Decoder {
             _ => return DecodeOutcome::Unsupported(format!("{candidate} decoding is not enabled")),
         };
         let result = (|| {
-            if self.cancelled.load(Ordering::Acquire) {
+            if cancel.is_cancelled() {
                 return Err(DecodeError::new(FailureClass::Cancelled, "decoder stopped"));
             }
-            let file = File::open(path)?;
             let mut bytes = Vec::new();
-            file.take(self.limits.input_bytes.saturating_add(1))
-                .read_to_end(&mut bytes)?;
+            let mut limited = file.take(self.limits.input_bytes.saturating_add(1));
+            let mut chunk = [0; 64 * 1024];
+            loop {
+                if cancel.is_cancelled() {
+                    return Err(DecodeError::new(
+                        FailureClass::Cancelled,
+                        "attempt cancelled",
+                    ));
+                }
+                let count = limited.read(&mut chunk)?;
+                if count == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk[..count]);
+                observe(DecodeEvent::SourceRead(count as u64));
+            }
             if bytes.len() as u64 > self.limits.input_bytes {
                 return Err(DecodeError::limit("input byte limit exceeded"));
             }
             if codec == 0 {
-                return crate::decode::jpeg(&bytes, size, &self.limits);
+                let result = crate::decode::jpeg(&bytes, size, &self.limits);
+                if cancel.is_cancelled() {
+                    return Err(DecodeError::new(
+                        FailureClass::Cancelled,
+                        "attempt cancelled",
+                    ));
+                }
+                return result;
             }
             let request = encode_request(codec, size, &self.limits, &bytes);
             supervise(
@@ -66,7 +120,8 @@ impl Decoder {
                 request,
                 size,
                 &self.limits,
-                &self.cancelled,
+                cancel,
+                observe,
             )
         })();
         match result {
@@ -89,9 +144,16 @@ fn supervise(
     request: Vec<u8>,
     size: PreviewSize,
     limits: &DecodeLimits,
-    cancelled: &AtomicBool,
+    cancel: &CancelToken,
+    observe: &dyn Fn(DecodeEvent),
 ) -> Result<DecodeResult, DecodeError> {
     let started = Instant::now();
+    if cancel.is_cancelled() {
+        return Err(DecodeError::new(
+            FailureClass::Cancelled,
+            "attempt cancelled",
+        ));
+    }
     let mut child = ChildGuard(
         Command::new(executable)
             .arg("--crema-decode-worker")
@@ -101,6 +163,8 @@ fn supervise(
             .stderr(Stdio::piped())
             .spawn()?,
     );
+    let pid = child.0.id();
+    observe(DecodeEvent::WorkerSpawned(pid));
     let mut stdin = child.0.stdin.take().expect("piped stdin");
     let stdout = child.0.stdout.take().expect("piped stdout");
     let stderr = child.0.stderr.take().expect("piped stderr");
@@ -114,7 +178,7 @@ fn supervise(
     let errors = thread::spawn(move || drain_stderr(stderr));
     let mut output = None;
     let process_result = loop {
-        if cancelled.load(Ordering::Acquire) {
+        if cancel.is_cancelled() {
             break Err(DecodeError::new(FailureClass::Cancelled, "decoder stopped"));
         }
         if started.elapsed() >= limits.timeout {
@@ -146,6 +210,7 @@ fn supervise(
         let _ = child.0.kill();
     }
     let _ = child.0.wait();
+    observe(DecodeEvent::WorkerReaped(pid));
     let write_result = writer
         .join()
         .map_err(|_| DecodeError::protocol("stdin writer panicked"));
