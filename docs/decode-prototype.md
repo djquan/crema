@@ -187,8 +187,24 @@ selected preemption, child reap, continuous thumbnail restart, full-publication
 shutdown, and persistent-cache reuse across process restart. Cache tests use real
 files for corruption, atomic publication, quota reconciliation, and fallback.
 
+The viewer's first editing slice retains CPU pixels only for viewer entries. It
+uses a 1024-pixel source while the exposure slider moves and a 4096-pixel source
+after the slider settles. Render completions must match the asset, edit revision,
+source epoch, and requested quality. Sidecar save and JPEG export have separate
+bounded workers, so preview replacement and selection changes do not cancel
+either operation.
+
+Crema recognizes only its own bounded XMP packet in this slice. A foreign,
+malformed, or newer packet stays unchanged and blocks save. Export reopens the
+original read-only, checks the source identity, uses the same exposure renderer
+as preview, embeds an sRGB ICC profile, and refuses to replace an existing output.
+The output name is `<original complete filename>-crema.jpg`. The UI labels this
+path `SDR JPEG, max 4096 px`.
+
 This slice does not establish the full Phase 0 release gate. RAF modes, broad RAW
 coverage, progressive JPEG fixtures, HEIC HDR and high-bit-depth variants, color
-accuracy, Windows and Linux behavior, full-resolution zoom, XMP, and export need
-separate evidence. Private source photographs and their pixels are not repository
-fixtures. Rawler keeps its LGPL license independently of Crema's MIT license.
+accuracy, Windows source identity and durable folder publication, full-resolution
+zoom, and foreign XMP import need separate evidence. Crash-safe sidecar and export
+publication has real-filesystem coverage on macOS. Private source photographs and
+their pixels are not repository fixtures. Rawler keeps its LGPL license
+independently of Crema's MIT license.

@@ -39,7 +39,7 @@ fn ready(
     let mut first = true;
     wait_until(|| {
         while let Some(event) = runtime.try_recv() {
-            if let Event::Decoded { key, outcome } = event {
+            if let Event::Decoded { key, outcome, .. } = event {
                 if key.asset != request.key.asset || key.generation != request.key.generation {
                     continue;
                 }

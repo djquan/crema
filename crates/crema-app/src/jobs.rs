@@ -1,4 +1,5 @@
 use crate::{
+    SourceStamp,
     metrics::{Metrics, Span},
     preview::PreviewEngine,
     thumbnail_cache::CacheConfig,
@@ -66,6 +67,7 @@ pub enum Event {
     Decoded {
         key: JobKey,
         outcome: DecodeOutcome,
+        source_stamp: Option<SourceStamp>,
     },
 }
 struct Interest {
@@ -200,15 +202,27 @@ pub struct PreviewRuntime {
     wake: Wake,
     metrics: Metrics,
 }
+
+struct DecodeDelivery {
+    purpose: Purpose,
+    outcome: DecodeOutcome,
+    source_stamp: Option<SourceStamp>,
+    terminal: bool,
+}
+
 fn admit(
     shared: &Shared,
     attempt: &Attempt,
-    purpose: Purpose,
-    outcome: DecodeOutcome,
-    terminal: bool,
+    delivery: DecodeDelivery,
     wake: &Wake,
     span: &Span,
 ) -> bool {
+    let DecodeDelivery {
+        purpose,
+        outcome,
+        source_stamp,
+        terminal,
+    } = delivery;
     let mut state = shared.0.lock().expect("preview state");
     if matches!(&outcome, DecodeOutcome::Failed(error) if error.class == FailureClass::Cancelled) {
         return false;
@@ -260,6 +274,7 @@ fn admit(
                 ..attempt.key
             },
             outcome,
+            source_stamp,
         },
     };
     if attempt.selected {
@@ -317,8 +332,19 @@ impl PreviewRuntime {
                         &request,
                         &attempt.cancel,
                         &span,
-                        |purpose, outcome, terminal| {
-                            admit(&shared, &attempt, purpose, outcome, terminal, &wake, &span)
+                        |purpose, outcome, source_stamp, terminal| {
+                            admit(
+                                &shared,
+                                &attempt,
+                                DecodeDelivery {
+                                    purpose,
+                                    outcome,
+                                    source_stamp,
+                                    terminal,
+                                },
+                                &wake,
+                                &span,
+                            )
                         },
                     );
                     span.record(
@@ -648,6 +674,7 @@ mod tests {
                 event: Event::Decoded {
                     key: request.key,
                     outcome: DecodeOutcome::Unsupported("test state".into()),
+                    source_stamp: None,
                 },
             };
             if request.key == b.key {
@@ -678,6 +705,7 @@ mod tests {
             event: Event::Decoded {
                 key: a.key,
                 outcome: DecodeOutcome::Unsupported("pure completion state".into()),
+                source_stamp: None,
             },
         });
         state.replace(PreviewDemand {

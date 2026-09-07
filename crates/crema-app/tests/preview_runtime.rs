@@ -112,6 +112,7 @@ fn selected_preempts_real_child_reaps_it_and_restarts_continuous_thumbnail() {
         Some(Event::Decoded {
             key,
             outcome: DecodeOutcome::Decoded(_),
+            ..
         }) => key == b.key,
         Some(Event::Decoded { outcome, .. }) => panic!("obsolete failure leaked: {outcome:?}"),
         _ => false,

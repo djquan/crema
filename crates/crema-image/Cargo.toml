@@ -5,6 +5,8 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+crema-core = { path = "../crema-core" }
 image.workspace = true
 rawler.workspace = true
 heif-oxide.workspace = true
+moxcms.workspace = true

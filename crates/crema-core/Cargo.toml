@@ -3,3 +3,6 @@ name = "crema-core"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+
+[dependencies]
+quick-xml.workspace = true

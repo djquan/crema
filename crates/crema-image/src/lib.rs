@@ -2,7 +2,9 @@ use std::fmt;
 use std::path::Path;
 
 mod decode;
+pub mod edit_render;
 mod frame;
+pub mod jpeg_export;
 mod worker;
 
 pub use frame::*;
@@ -52,6 +54,17 @@ pub fn classify_candidate(path: &Path) -> Option<CandidateFormat> {
         "png" => Some(CandidateFormat::Raster(RasterFormat::Png)),
         "tif" | "tiff" => Some(CandidateFormat::Raster(RasterFormat::Tiff)),
         _ => None,
+    }
+}
+
+impl CandidateFormat {
+    pub fn sidecar_naming(self) -> crema_core::sidecar::SidecarNaming {
+        use crema_core::sidecar::SidecarNaming;
+
+        match self {
+            Self::Raw(RawFormat::Dng) | Self::Raster(_) => SidecarNaming::AppendXmpExtension,
+            Self::Raw(_) => SidecarNaming::ReplaceOriginalExtension,
+        }
     }
 }
 

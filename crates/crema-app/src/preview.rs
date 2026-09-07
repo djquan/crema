@@ -26,7 +26,7 @@ impl PreviewEngine {
         request: &PreviewRequest,
         cancel: &CancelToken,
         span: &Span,
-        emit: impl Fn(Purpose, DecodeOutcome, bool) -> bool,
+        emit: impl Fn(Purpose, DecodeOutcome, Option<SourceStamp>, bool) -> bool,
     ) {
         let config = request
             .path
@@ -46,6 +46,7 @@ impl PreviewEngine {
                     emit(
                         request.key.purpose,
                         DecodeOutcome::Failed(error.into()),
+                        None,
                         true,
                     );
                     return;
@@ -61,7 +62,13 @@ impl PreviewEngine {
                 }
                 span.record("cache_hit", 1);
                 let terminal = request.key.purpose == Purpose::Thumbnail;
-                if !emit(Purpose::Thumbnail, DecodeOutcome::Decoded(cached), terminal) || terminal {
+                if !emit(
+                    Purpose::Thumbnail,
+                    DecodeOutcome::Decoded(cached),
+                    stamp.clone(),
+                    terminal,
+                ) || terminal
+                {
                     return;
                 }
             } else {
@@ -97,6 +104,7 @@ impl PreviewEngine {
                         class: FailureClass::Io,
                         message: "source changed during both decode attempts".into(),
                     }),
+                    None,
                     true,
                 );
                 return;
@@ -105,7 +113,7 @@ impl PreviewEngine {
                 DecodeOutcome::Decoded(result) => derive_thumbnail(result),
                 _ => None,
             };
-            if !emit(request.key.purpose, outcome, true) {
+            if !emit(request.key.purpose, outcome, stamp, true) {
                 return;
             }
             if let (Some(key), Some(thumbnail)) = (key, thumbnail) {
@@ -124,6 +132,7 @@ impl PreviewEngine {
                 class: FailureClass::Io,
                 message: "source changed during cache lookup".into(),
             }),
+            None,
             true,
         );
     }
@@ -221,16 +230,22 @@ mod tests {
             budget: 1024 * 1024,
         };
         let engine = PreviewEngine::new(std::env::current_exe().unwrap(), config.clone());
+        let delivered_stamp = Mutex::new(None);
         engine.run(
             &request,
             &CancelToken::new(),
             &span,
-            |purpose, outcome, terminal| {
+            |purpose, outcome, source_stamp, terminal| {
                 assert_eq!(purpose, Purpose::Viewer);
                 assert!(terminal);
                 assert!(matches!(outcome, DecodeOutcome::Decoded(_)));
+                *delivered_stamp.lock().unwrap() = source_stamp;
                 true
             },
+        );
+        assert_eq!(
+            delivered_stamp.lock().unwrap().as_ref(),
+            Some(&SourceStamp::read(&File::open(&path).unwrap()).unwrap())
         );
         assert!(
             metrics
@@ -259,7 +274,7 @@ mod tests {
             &request,
             &CancelToken::new(),
             &span,
-            |_, outcome, terminal| {
+            |_, outcome, _source_stamp, terminal| {
                 assert!(terminal);
                 let DecodeOutcome::Decoded(result) = outcome else {
                     panic!("cache hit");

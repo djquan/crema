@@ -1,11 +1,21 @@
+use crate::editor::{
+    Comparison, EditorEvent, EditorRuntime, ExportRequest, RenderDemand, RenderKey, RenderQuality,
+    RenderRequest, SaveRequest, SourceIdentity, save_state_label,
+};
 use crate::jobs::{Event, JobKey, PreviewDemand, PreviewRequest, PreviewRuntime, Purpose};
 use crate::{metrics::Metrics, thumbnail_cache::CacheConfig};
+use crema_core::edit::{EditCommand, EditSession, ExposureCentistops, SaveState};
+use crema_core::sidecar::{SidecarLocation, SidecarStore};
 use crema_core::{AssetCandidate, AssetId};
-use crema_image::{CandidateFormat, DecodeOutcome, FailureClass, Provenance, SourceMetadata};
+use crema_image::{
+    CandidateFormat, DecodeOutcome, DecodeResult, FailureClass, PreviewPixels, PreviewSize,
+    Provenance, SourceMetadata,
+};
 use eframe::egui::{self, Color32, RichText, TextureHandle, TextureOptions, Vec2};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
+    sync::Arc,
     time::Instant,
 };
 
@@ -106,6 +116,7 @@ impl Workspace {
 enum Cached {
     Image {
         texture: TextureHandle,
+        viewer_pixels: Option<ViewerPixels>,
         metadata: SourceMetadata,
         provenance: Provenance,
         used: u64,
@@ -117,10 +128,57 @@ enum Cached {
     },
 }
 
+#[derive(Clone)]
+struct ViewerPixels {
+    interactive: Arc<PreviewPixels>,
+    detail: Arc<PreviewPixels>,
+}
+
+enum EditorDocument {
+    Ready {
+        session: EditSession,
+        source: Option<SourceIdentity>,
+        source_error: Option<String>,
+    },
+    ReadOnly(String),
+}
+
+struct EditedPreview {
+    demand: RenderDemand,
+    texture: TextureHandle,
+}
+
+#[derive(Default)]
+enum ExportState {
+    #[default]
+    Idle,
+    Exporting,
+    Exported(String),
+    Failed(String),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum CloseConfirmation {
+    #[default]
+    Inactive,
+    Prompting,
+    Discarding,
+}
+
 impl Cached {
     fn bytes(&self) -> usize {
         match self {
-            Self::Image { texture, .. } => texture.size()[0] * texture.size()[1] * 4,
+            Self::Image {
+                texture,
+                viewer_pixels,
+                ..
+            } => {
+                let cpu = viewer_pixels
+                    .as_ref()
+                    .map(|pixels| pixels.interactive.rgba8().len() + pixels.detail.rgba8().len())
+                    .unwrap_or(0);
+                texture.size()[0] * texture.size()[1] * 4 + cpu
+            }
             Self::Unavailable { .. } => 0,
         }
     }
@@ -188,6 +246,72 @@ fn concise_reason(reason: &str) -> String {
         .collect()
 }
 
+fn open_document(path: &std::path::Path, format: CandidateFormat) -> EditorDocument {
+    let location = match SidecarLocation::for_original(path, format.sidecar_naming()) {
+        Ok(location) => location,
+        Err(error) => return EditorDocument::ReadOnly(error.to_string()),
+    };
+    match SidecarStore.open(location) {
+        Ok(opened) => EditorDocument::Ready {
+            session: EditSession::open(opened),
+            source: None,
+            source_error: None,
+        },
+        Err(error) => EditorDocument::ReadOnly(error.to_string()),
+    }
+}
+
+fn prepare_viewer_pixels(pixels: PreviewPixels) -> ViewerPixels {
+    let detail = Arc::new(pixels);
+    if detail.width().max(detail.height()) <= 1024 {
+        return ViewerPixels {
+            interactive: detail.clone(),
+            detail,
+        };
+    }
+    let image = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(
+        detail.width(),
+        detail.height(),
+        detail.rgba8(),
+    )
+    .expect("validated preview pixels");
+    let interactive = image::imageops::thumbnail(&image, 1024, 1024);
+    let interactive = PreviewPixels::new(
+        interactive.width(),
+        interactive.height(),
+        interactive.into_raw(),
+        PreviewSize::new(1024).expect("fixed interactive bound"),
+    )
+    .expect("derived interactive preview");
+    ViewerPixels {
+        interactive: Arc::new(interactive),
+        detail,
+    }
+}
+
+fn retain_viewer_pixels(purpose: Purpose, pixels: PreviewPixels) -> Option<ViewerPixels> {
+    (purpose == Purpose::Viewer).then(|| prepare_viewer_pixels(pixels))
+}
+
+fn accepts_render(demands: &HashMap<AssetId, RenderDemand>, key: RenderKey) -> bool {
+    demands
+        .get(&key.asset())
+        .is_some_and(|demand| demand.accepts(key))
+}
+
+fn needs_activation_render(
+    previous: Option<AssetId>,
+    next: AssetId,
+    nonzero_recipe: bool,
+    has_accepted_texture: bool,
+) -> bool {
+    previous != Some(next) && nonzero_recipe && !has_accepted_texture
+}
+
+fn cancel_close(requested: bool, has_unsaved: bool, state: CloseConfirmation) -> bool {
+    requested && has_unsaved && state != CloseConfirmation::Discarding
+}
+
 pub struct Browser {
     root: PathBuf,
     workspace: Workspace,
@@ -200,6 +324,15 @@ pub struct Browser {
     metric_path: Option<PathBuf>,
     measured_selection: Option<JobKey>,
     drawn: HashSet<Purpose>,
+    editor: EditorRuntime,
+    documents: HashMap<AssetId, EditorDocument>,
+    input_epochs: HashMap<AssetId, u64>,
+    render_demands: HashMap<AssetId, RenderDemand>,
+    edited_previews: HashMap<AssetId, EditedPreview>,
+    comparison: Comparison,
+    exports: HashMap<AssetId, ExportState>,
+    active_viewer: Option<AssetId>,
+    close_confirmation: CloseConfirmation,
 }
 
 impl Browser {
@@ -227,12 +360,17 @@ impl Browser {
         style.visuals.selection.bg_fill = Color32::from_rgb(99, 116, 93);
         style.visuals.panel_fill = Color32::from_rgb(27, 28, 27);
         context.set_style_of(egui::Theme::Dark, style);
+        let preview_context = context.clone();
+        let editor_executable = executable.clone();
         let jobs = PreviewRuntime::with_options(
             executable,
             cache.outside_source(&root),
             metrics.clone(),
-            move || context.request_repaint(),
+            move || preview_context.request_repaint(),
         );
+        let editor_context = context.clone();
+        let editor =
+            EditorRuntime::new(editor_executable, move || editor_context.request_repaint());
         jobs.scan(root.clone(), 1);
         Self {
             root,
@@ -246,6 +384,15 @@ impl Browser {
             metric_path,
             measured_selection: None,
             drawn: HashSet::new(),
+            editor,
+            documents: HashMap::new(),
+            input_epochs: HashMap::new(),
+            render_demands: HashMap::new(),
+            edited_previews: HashMap::new(),
+            comparison: Comparison::After,
+            exports: HashMap::new(),
+            active_viewer: None,
+            close_confirmation: CloseConfirmation::Inactive,
         }
     }
 
@@ -254,6 +401,388 @@ impl Browser {
             generation: self.workspace.generation,
             asset,
             purpose,
+        }
+    }
+
+    fn set_source_identity(&mut self, asset: AssetId, stamp: Option<crate::SourceStamp>) {
+        let Some(path) = self
+            .workspace
+            .index
+            .get(&asset)
+            .map(|index| self.workspace.assets[*index].path().to_owned())
+        else {
+            return;
+        };
+        if let Some(EditorDocument::Ready {
+            source,
+            source_error,
+            ..
+        }) = self.documents.get_mut(&asset)
+        {
+            match stamp {
+                Some(stamp) => {
+                    *source = Some(SourceIdentity::from_validated(path, stamp));
+                    *source_error = None;
+                }
+                None => {
+                    *source = None;
+                    *source_error = Some("source identity is unavailable".to_owned());
+                }
+            }
+        }
+    }
+
+    fn ensure_document(&mut self, asset: AssetId) {
+        if self.documents.contains_key(&asset) {
+            return;
+        }
+        let Some(index) = self.workspace.index.get(&asset).copied() else {
+            return;
+        };
+        let candidate = &self.workspace.assets[index];
+        self.documents
+            .insert(asset, open_document(candidate.path(), *candidate.kind()));
+        self.exports.entry(asset).or_default();
+    }
+
+    fn activate_viewer(&mut self, next: Option<AssetId>) {
+        let previous = self.active_viewer;
+        if previous == next {
+            return;
+        }
+        self.active_viewer = next;
+        let Some(asset) = next else {
+            return;
+        };
+        self.ensure_document(asset);
+        let nonzero_recipe = matches!(
+            self.documents.get(&asset),
+            Some(EditorDocument::Ready { session, .. })
+                if session.recipe().exposure().value() != 0
+        );
+        let has_accepted_texture = self.edited_previews.get(&asset).is_some_and(|preview| {
+            self.render_demands
+                .get(&asset)
+                .is_some_and(|demand| *demand == preview.demand)
+        });
+        if needs_activation_render(previous, asset, nonzero_recipe, has_accepted_texture) {
+            self.schedule_render(asset, RenderQuality::Settled);
+        }
+    }
+
+    fn remove_cache_entry(&mut self, key: JobKey) {
+        self.cache.remove(&key);
+        if key.purpose == Purpose::Viewer {
+            self.render_demands.remove(&key.asset);
+            self.edited_previews.remove(&key.asset);
+            self.editor.clear_render(key.asset);
+        }
+    }
+
+    fn has_unsaved_changes(&self) -> bool {
+        self.documents.values().any(|document| {
+            matches!(
+                document,
+                EditorDocument::Ready { session, .. } if session.is_dirty()
+            )
+        })
+    }
+
+    fn handle_close(&mut self, context: &egui::Context) {
+        let requested = context.input(|input| input.viewport().close_requested());
+        if cancel_close(
+            requested,
+            self.has_unsaved_changes(),
+            self.close_confirmation,
+        ) {
+            context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_confirmation = CloseConfirmation::Prompting;
+        }
+        if self.close_confirmation != CloseConfirmation::Prompting {
+            return;
+        }
+        egui::Modal::new(egui::Id::new("dirty-close-confirmation")).show(context, |ui| {
+            ui.heading("Unsaved changes");
+            ui.label("One or more photos have changes that are not saved to XMP.");
+            ui.horizontal(|ui| {
+                if ui.button("Keep editing").clicked() {
+                    self.close_confirmation = CloseConfirmation::Inactive;
+                }
+                if ui.button("Discard changes and close").clicked() {
+                    self.close_confirmation = CloseConfirmation::Discarding;
+                    context.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+        });
+    }
+
+    fn schedule_render(&mut self, asset: AssetId, quality: RenderQuality) {
+        let Some(EditorDocument::Ready { session, .. }) = self.documents.get(&asset) else {
+            return;
+        };
+        if session.recipe().exposure().value() == 0 {
+            self.render_demands.remove(&asset);
+            self.edited_previews.remove(&asset);
+            self.editor.clear_render(asset);
+            return;
+        }
+        let snapshot = session.snapshot();
+        let Some(epoch) = self.input_epochs.get(&asset).copied() else {
+            return;
+        };
+        let viewer = self.key(asset, Purpose::Viewer);
+        let Some(Cached::Image {
+            viewer_pixels: Some(pixels),
+            ..
+        }) = self.cache.get(&viewer)
+        else {
+            return;
+        };
+        let pixels = match quality {
+            RenderQuality::Interactive => pixels.interactive.clone(),
+            RenderQuality::Settled => pixels.detail.clone(),
+        };
+        let key = RenderKey::new(asset, snapshot.revision(), epoch, quality);
+        self.render_demands.insert(asset, RenderDemand::new(key));
+        self.editor
+            .replace_render(RenderRequest::new(key, pixels, snapshot));
+    }
+
+    fn receive_editor(&mut self, context: &egui::Context) {
+        while let Some(event) = self.editor.try_recv() {
+            match event {
+                EditorEvent::Rendered(result) => {
+                    let key = result.key();
+                    if !accepts_render(&self.render_demands, key) {
+                        continue;
+                    }
+                    let rendered = result.rendered();
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [rendered.width() as usize, rendered.height() as usize],
+                        rendered.rgba8(),
+                    );
+                    let texture = context.load_texture(
+                        format!(
+                            "{}-edit-{}-{}-{:?}",
+                            key.asset(),
+                            key.revision().value(),
+                            key.input_epoch(),
+                            key.quality()
+                        ),
+                        image,
+                        TextureOptions::LINEAR,
+                    );
+                    self.edited_previews.insert(
+                        key.asset(),
+                        EditedPreview {
+                            demand: RenderDemand::new(key),
+                            texture,
+                        },
+                    );
+                }
+                EditorEvent::Saved(result) => {
+                    if let Some(EditorDocument::Ready { session, .. }) =
+                        self.documents.get_mut(&result.asset())
+                    {
+                        session.accept_save(result.into_completion());
+                    }
+                }
+                EditorEvent::Exported(result) => {
+                    let exposure = result.snapshot().recipe().exposure().as_stops();
+                    let current_is_newer = matches!(
+                        self.documents.get(&result.asset()),
+                        Some(EditorDocument::Ready { session, .. })
+                            if session.revision() != result.snapshot().revision()
+                    );
+                    let newer = if current_is_newer {
+                        ". Current controls are newer"
+                    } else {
+                        ""
+                    };
+                    self.exports.insert(
+                        result.asset(),
+                        ExportState::Exported(format!(
+                            "Exported {} × {} at {exposure:+.2} EV to {}{newer}",
+                            result.dimensions()[0],
+                            result.dimensions()[1],
+                            result.destination().display()
+                        )),
+                    );
+                }
+                EditorEvent::ExportFailed(failure) => {
+                    self.exports
+                        .insert(failure.asset(), ExportState::Failed(failure.to_string()));
+                }
+            }
+        }
+    }
+
+    fn editor_controls(&mut self, ui: &mut egui::Ui) {
+        let Some(asset) = self.workspace.selected else {
+            return;
+        };
+        let mut render = None;
+        let mut save = None;
+        let mut export = None;
+        let viewer_key = self.key(asset, Purpose::Viewer);
+        let editing_available = matches!(
+            self.cache.get(&viewer_key),
+            Some(Cached::Image {
+                viewer_pixels: Some(_),
+                ..
+            })
+        );
+        ui.horizontal_wrapped(|ui| {
+            let Some(document) = self.documents.get_mut(&asset) else {
+                ui.label("Read-only");
+                return;
+            };
+            match document {
+                EditorDocument::ReadOnly(message) => {
+                    ui.colored_label(Color32::from_rgb(235, 156, 130), "Read-only")
+                        .on_hover_text(message.as_str());
+                }
+                EditorDocument::Ready {
+                    session,
+                    source,
+                    source_error,
+                } => {
+                    let mut exposure = session.recipe().exposure().value();
+                    let slider = ui.add_enabled(
+                        editing_available,
+                        egui::Slider::new(&mut exposure, -500..=500)
+                            .step_by(5.0)
+                            .text("Exposure (EV)")
+                            .custom_formatter(|value, _| format!("{:+.2}", value / 100.0)),
+                    );
+                    if slider.changed()
+                        && let Ok(exposure) = ExposureCentistops::new(exposure)
+                        && session.apply(EditCommand::SetExposure(exposure)).is_some()
+                    {
+                        render = Some(if slider.dragged() {
+                            RenderQuality::Interactive
+                        } else {
+                            RenderQuality::Settled
+                        });
+                    }
+                    if slider.drag_stopped() {
+                        render = Some(RenderQuality::Settled);
+                    }
+                    if ui
+                        .add_enabled(editing_available, egui::Button::new("Reset"))
+                        .clicked()
+                        && session.apply(EditCommand::ResetExposure).is_some()
+                    {
+                        render = Some(RenderQuality::Settled);
+                    }
+
+                    let mut before = self.comparison == Comparison::Before;
+                    if ui
+                        .add_enabled(
+                            editing_available,
+                            egui::Button::selectable(before, "Before"),
+                        )
+                        .clicked()
+                    {
+                        before = !before;
+                        self.comparison = if before {
+                            Comparison::Before
+                        } else {
+                            Comparison::After
+                        };
+                    }
+                    if !editing_available {
+                        ui.colored_label(
+                            Color32::from_rgb(235, 156, 130),
+                            "Editing unavailable because viewer pixels are unavailable",
+                        );
+                    }
+
+                    let state = session.save_state();
+                    let label = if source.is_none() {
+                        if session.is_dirty() {
+                            "Read-only · Unsaved changes".to_owned()
+                        } else {
+                            "Read-only".to_owned()
+                        }
+                    } else {
+                        save_state_label(&state, session.is_dirty())
+                    };
+                    let state_label = ui.label(label);
+                    if let Some(error) = source_error {
+                        state_label.on_hover_text(error.as_str());
+                    }
+                    let save_enabled = source.is_some()
+                        && session.is_dirty()
+                        && !matches!(
+                            state,
+                            SaveState::Saving { .. }
+                                | SaveState::ReadOnly(_)
+                                | SaveState::Conflict(_)
+                        );
+                    if ui
+                        .add_enabled(save_enabled, egui::Button::new("Save XMP"))
+                        .clicked()
+                        && let (Some(source), Ok(Some(command))) =
+                            (source.clone(), session.begin_save())
+                    {
+                        save = Some(SaveRequest::new(asset, source, command));
+                    }
+
+                    ui.separator();
+                    ui.label("SDR JPEG, max 4096 px");
+                    let exporting =
+                        matches!(self.exports.get(&asset), Some(ExportState::Exporting));
+                    if ui
+                        .add_enabled(
+                            source.is_some() && !exporting,
+                            egui::Button::new("Export JPEG"),
+                        )
+                        .clicked()
+                        && let Some(source) = source.clone()
+                    {
+                        export = Some((source, session.snapshot()));
+                    }
+                }
+            }
+        });
+
+        if let Some(quality) = render {
+            self.schedule_render(asset, quality);
+        }
+        if let Some(request) = save {
+            let _ = self.editor.submit_save(request);
+        }
+        if let Some((source, snapshot)) = export {
+            let Some(index) = self.workspace.index.get(&asset).copied() else {
+                return;
+            };
+            let format = *self.workspace.assets[index].kind();
+            match ExportRequest::new(asset, source, format, snapshot) {
+                Ok(request) => {
+                    self.exports.insert(asset, ExportState::Exporting);
+                    if let Err(error) = self.editor.submit_export(request) {
+                        self.exports
+                            .insert(asset, ExportState::Failed(error.to_string()));
+                    }
+                }
+                Err(error) => {
+                    self.exports
+                        .insert(asset, ExportState::Failed(error.to_string()));
+                }
+            }
+        }
+        match self.exports.get(&asset) {
+            Some(ExportState::Exporting) => {
+                ui.label("Exporting");
+            }
+            Some(ExportState::Exported(message)) => {
+                ui.label(message);
+            }
+            Some(ExportState::Failed(message)) => {
+                ui.colored_label(Color32::from_rgb(235, 156, 130), message);
+            }
+            Some(ExportState::Idle) | None => {}
         }
     }
 
@@ -266,7 +795,9 @@ impl Browser {
                 Event::Candidate {
                     generation,
                     candidate,
-                } => self.workspace.insert(generation, candidate),
+                } => {
+                    self.workspace.insert(generation, candidate);
+                }
                 Event::ScanFinished {
                     generation,
                     failures,
@@ -275,15 +806,26 @@ impl Browser {
                     self.workspace.failures = failures;
                 }
                 Event::ScanFinished { .. } => {}
-                Event::Decoded { key, outcome } if self.workspace.accepts(key) => {
+                Event::Decoded {
+                    key,
+                    outcome,
+                    source_stamp,
+                } if self.workspace.accepts(key) => {
                     let cached = match outcome {
                         DecodeOutcome::Decoded(result) => {
                             self.metrics.record("gui_received", Some(key), 0, 0, 1);
-                            self.evict(key.purpose, result.preview.rgba8().len());
+                            let DecodeResult {
+                                preview,
+                                metadata,
+                                provenance,
+                            } = result;
+                            let incoming = preview.rgba8().len()
+                                * if key.purpose == Purpose::Viewer { 3 } else { 1 };
+                            self.evict(key.purpose, incoming);
                             let upload_started = Instant::now();
                             let image = egui::ColorImage::from_rgba_unmultiplied(
-                                result.preview.dimensions_usize(),
-                                result.preview.rgba8(),
+                                preview.dimensions_usize(),
+                                preview.rgba8(),
                             );
                             let texture = context.load_texture(
                                 format!("{}-{:?}", key.asset, key.purpose),
@@ -297,10 +839,12 @@ impl Browser {
                                 0,
                                 upload_started.elapsed().as_micros() as u64,
                             );
+                            let viewer_pixels = retain_viewer_pixels(key.purpose, preview);
                             Cached::Image {
                                 texture,
-                                metadata: result.metadata,
-                                provenance: result.provenance,
+                                viewer_pixels,
+                                metadata,
+                                provenance,
                                 used: self.tick,
                             }
                         }
@@ -316,8 +860,16 @@ impl Browser {
                         },
                     };
                     self.cache.insert(key, cached);
+                    if key.purpose == Purpose::Viewer {
+                        self.ensure_document(key.asset);
+                        self.set_source_identity(key.asset, source_stamp);
+                        let epoch = self.input_epochs.entry(key.asset).or_insert(0);
+                        *epoch = epoch.checked_add(1).expect("viewer input epoch exhausted");
+                        self.edited_previews.remove(&key.asset);
+                        self.schedule_render(key.asset, RenderQuality::Settled);
+                    }
                     while let Some(oldest) = unavailable_to_evict(&self.cache, key.purpose, 256) {
-                        self.cache.remove(&oldest);
+                        self.remove_cache_entry(oldest);
                     }
                 }
                 Event::Decoded { .. } => {}
@@ -349,7 +901,7 @@ impl Browser {
                 })
                 .map(|(key, _)| *key);
             if let Some(key) = oldest {
-                self.cache.remove(&key);
+                self.remove_cache_entry(key);
             } else {
                 break;
             }
@@ -392,7 +944,7 @@ impl Browser {
     fn retry_selected(&mut self) {
         if let Some(key) = self.retry_key() {
             self.jobs.forget(&[key]);
-            self.cache.remove(&key);
+            self.remove_cache_entry(key);
         }
     }
 
@@ -586,12 +1138,32 @@ impl Browser {
                 format!("Larger preview unavailable: {reason}"),
             );
         }
+        let use_original = self
+            .documents
+            .get(&id)
+            .and_then(|document| match document {
+                EditorDocument::Ready { session, .. } => {
+                    Some(self.comparison.uses_original(session.recipe()))
+                }
+                EditorDocument::ReadOnly(_) => None,
+            })
+            .unwrap_or(true);
+        let edited_texture = (!use_original)
+            .then(|| self.edited_previews.get(&id))
+            .flatten()
+            .filter(|preview| {
+                self.render_demands
+                    .get(&id)
+                    .is_some_and(|demand| *demand == preview.demand)
+            })
+            .map(|preview| preview.texture.clone());
         match self.cache.get_mut(&display_key) {
             Some(Cached::Image {
                 texture,
                 metadata,
                 provenance,
                 used,
+                ..
             }) => {
                 *used = self.tick;
                 ui.label(format!(
@@ -608,6 +1180,10 @@ impl Browser {
                 if display_key != key && larger_error.is_none() {
                     ui.label("Loading larger preview");
                 }
+                if !use_original && edited_texture.is_none() {
+                    ui.label("Rendering edit");
+                }
+                let texture = edited_texture.as_ref().unwrap_or(texture);
                 let available = ui.available_size();
                 let source = texture.size_vec2();
                 if self.actual_pixels {
@@ -648,6 +1224,7 @@ impl Browser {
 impl eframe::App for Browser {
     fn on_exit(&mut self) {
         self.jobs.shutdown();
+        self.editor.shutdown();
         if let Some(path) = self.metric_path.take() {
             self.metrics.record("gui_exit", None, 0, 0, 1);
             if let Err(error) = self.metrics.save(&path) {
@@ -658,10 +1235,12 @@ impl eframe::App for Browser {
 
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.receive(context);
+        self.receive_editor(context);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.tick += 1;
+        self.handle_close(ui.ctx());
         egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Crema");
@@ -750,6 +1329,14 @@ impl eframe::App for Browser {
                 return;
             }
             self.measure_selection();
+            let active_viewer = (self.workspace.view == View::Viewer)
+                .then_some(self.workspace.selected)
+                .flatten();
+            self.activate_viewer(active_viewer);
+            if active_viewer.is_some() {
+                self.editor_controls(ui);
+                ui.separator();
+            }
             let demands = match self.workspace.view {
                 View::Grid => self.grid(ui),
                 View::Viewer => self.viewer(ui),
@@ -887,6 +1474,50 @@ mod tests {
     }
 
     #[test]
+    fn browser_retains_cpu_pixels_only_for_viewers_and_checks_exact_render_demand() {
+        let asset = test_asset();
+        let pixels = || {
+            PreviewPixels::new(
+                2,
+                1,
+                vec![10, 20, 30, 255, 40, 50, 60, 255],
+                PreviewSize::new(2).unwrap(),
+            )
+            .unwrap()
+        };
+        assert!(retain_viewer_pixels(Purpose::Thumbnail, pixels()).is_none());
+        let retained = retain_viewer_pixels(Purpose::Viewer, pixels()).unwrap();
+        assert_eq!(retained.detail.rgba8(), retained.interactive.rgba8());
+
+        let current = RenderKey::new(
+            asset,
+            crema_core::edit::EditRevision::ZERO,
+            2,
+            RenderQuality::Settled,
+        );
+        let demands = HashMap::from([(asset, RenderDemand::new(current))]);
+        assert!(accepts_render(&demands, current));
+        assert!(!accepts_render(
+            &demands,
+            RenderKey::new(
+                asset,
+                crema_core::edit::EditRevision::ZERO,
+                1,
+                RenderQuality::Settled,
+            )
+        ));
+        let other = test_asset();
+        assert!(needs_activation_render(Some(other), asset, true, false));
+        assert!(!needs_activation_render(Some(asset), asset, true, false));
+        assert!(!needs_activation_render(Some(other), asset, false, false));
+        assert!(!needs_activation_render(Some(other), asset, true, true));
+        assert!(cancel_close(true, true, CloseConfirmation::Inactive));
+        assert!(cancel_close(true, true, CloseConfirmation::Prompting));
+        assert!(!cancel_close(true, true, CloseConfirmation::Discarding));
+        assert!(!cancel_close(true, false, CloseConfirmation::Inactive));
+    }
+
+    #[test]
     fn larger_preview_failure_preserves_thumbnail_and_retry_clears_only_selection() {
         let context = egui::Context::default();
         let wake = context.clone();
@@ -909,6 +1540,15 @@ mod tests {
             metric_path: None,
             measured_selection: None,
             drawn: HashSet::new(),
+            editor: EditorRuntime::new(std::env::current_exe().unwrap(), || {}),
+            documents: HashMap::new(),
+            input_epochs: HashMap::new(),
+            render_demands: HashMap::new(),
+            edited_previews: HashMap::new(),
+            comparison: Comparison::After,
+            exports: HashMap::new(),
+            active_viewer: None,
+            close_confirmation: CloseConfirmation::Inactive,
         };
         let thumbnail = browser.key(asset, Purpose::Thumbnail);
         let viewer = browser.key(asset, Purpose::Viewer);
@@ -925,6 +1565,7 @@ mod tests {
             thumbnail,
             Cached::Image {
                 texture,
+                viewer_pixels: None,
                 metadata: SourceMetadata {
                     dimensions: [1, 1],
                     decoded_dimensions: [1, 1],
@@ -1003,6 +1644,29 @@ mod tests {
             browser.cache.contains_key(&viewer),
             "retry only invalidates the current view's purpose"
         );
+        let render_key = RenderKey::new(
+            asset,
+            crema_core::edit::EditRevision::ZERO,
+            1,
+            RenderQuality::Settled,
+        );
+        let demand = RenderDemand::new(render_key);
+        browser.render_demands.insert(asset, demand);
+        browser.edited_previews.insert(
+            asset,
+            EditedPreview {
+                demand,
+                texture: context.load_texture(
+                    "edited-viewer",
+                    egui::ColorImage::new([1, 1], vec![Color32::WHITE]),
+                    TextureOptions::LINEAR,
+                ),
+            },
+        );
+        browser.remove_cache_entry(viewer);
+        assert!(!browser.cache.contains_key(&viewer));
+        assert!(!browser.render_demands.contains_key(&asset));
+        assert!(!browser.edited_previews.contains_key(&asset));
     }
 
     #[test]
@@ -1125,6 +1789,15 @@ mod tests {
             metric_path: None,
             measured_selection: None,
             drawn: HashSet::new(),
+            editor: EditorRuntime::new(std::env::current_exe().unwrap(), || {}),
+            documents: HashMap::new(),
+            input_epochs: HashMap::new(),
+            render_demands: HashMap::new(),
+            edited_previews: HashMap::new(),
+            comparison: Comparison::After,
+            exports: HashMap::new(),
+            active_viewer: None,
+            close_confirmation: CloseConfirmation::Inactive,
         };
         let count = Arc::new(AtomicUsize::new(0));
         let observed = count.clone();
