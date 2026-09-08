@@ -1,66 +1,87 @@
 # Crema
 
-A planned desktop RAW photo manager and non-destructive editor for macOS,
-Windows, and Linux, built with Rust.
+Crema is an experimental desktop photo browser and non-destructive editor written
+in Rust. It runs on macOS, Windows, and Linux through `eframe`, `egui`, and WGPU.
 
-Browse existing folders, organize photographs, and keep metadata and editing
-instructions in XMP sidecars beside the originals.
+The current Phase 0 application opens one folder, fills a virtualized thumbnail
+grid as the scan progresses, and shares selection between the grid and photo
+viewer. It decodes JPEG, RAW, and a narrow SDR HEIC subset. The editor supports
+exposure, before and after comparison, Crema-owned XMP sidecars, and profiled JPEG
+export. Originals remain unchanged.
 
-Broad RAW, HEIC, and JPEG support is a core goal. Fujifilm-specific validation
-is deferred while the first editing path settles.
+Phase 0 is implemented but has not passed its acceptance gate. Representative
+camera files, native Windows and Linux UI runs, assistive technology, display
+color, and release-hardware performance still need evidence.
 
-The current prototype opens a real folder progressively, displays JPEG, RAW, and
-HEIC previews, and keeps selection shared between a thumbnail grid and a viewer.
-RAW development and HEIC decoding run in a fresh worker process for each file.
-Originals remain untouched. PNG and TIFF candidates appear as unsupported.
+## Run Crema
+
+Crema requires Rust 1.95 or newer.
 
 ```sh
 cargo run --release -p crema-app --bin crema -- /path/to/photos
-cargo run -p crema-app --bin crema-scan -- /path/to/photos
-cargo run --release -p crema-app --bin crema-probe -- /path/to/photos
-python3 scripts/verify-phase0.py mac-local /tmp/crema-phase0 /path/to/photo.jpg /path/to/photo.heic /path/to/photo.raf /path/to/photo.orf
 ```
 
-Click a thumbnail to select it. Double-click or press Enter to open the viewer.
-Left and right arrows change selection. Escape returns to the grid.
-The viewer offers fit and 100% of the decoded preview, capped at 4096 pixels.
-It also offers exposure from -5.00 to +5.00 EV, a view-only **Before** toggle,
-reset, explicit sidecar save, and profiled JPEG export. Dragging the exposure
-slider uses a 1024-pixel preview. Releasing it renders the 4096-pixel preview.
+The folder scan is non-recursive and uses filesystem order. The app does not yet
+have a folder picker, catalog database, sorting, filtering, ratings, keywords, or
+file management.
 
-Crema writes only sidecars that use its own XMP schema. An existing foreign or
-unrecognized XMP file stays unchanged and makes sidecar save read-only. The
-editor still keeps unsaved changes in memory and shows both states. Export writes
-`<original complete filename>-crema.jpg` beside the source and refuses to replace
-an existing path.
+In the grid, click a thumbnail to select it. Double-click or press Enter to open
+the viewer. Use Left and Right to change the selected photo. Press Escape to
+return to the grid.
 
-The probe writes a TSV record for every attempted decode and continues after errors.
-Add `--fail-on-decode-error` to return status 2 when any decode fails. `--output`
-creates a new report file and refuses to overwrite an existing file.
+The viewer offers fit and 100% display of the decoded preview, which has a maximum
+long edge of 4096 pixels. Exposure ranges from -5.00 to +5.00 EV. Dragging uses a
+1024-pixel preview, and releasing the slider renders the detailed preview. **Before**
+shows the unedited preview without changing the recipe.
 
-Color rendering is experimental. Embedded JPEG ICC profiles are converted to
-sRGB. HEIC decoding accepts only one allowlisted complete 8-bit SDR NCLX
-description without an embedded ICC profile; high-bit, HDR, unknown-color, and
-hidden-profile inputs fail as unsupported instead of being displayed with guessed
-color. Independent numerical color validation remains open. Display profiles are
-not managed.
-RAW previews use Rawler's baseline development. Successful pixels do not establish
-camera-mode coverage or rendering quality. Exposure works on the decoder's
-display-ready 8-bit output under an sRGB assumption. Preview and export use the
-same exposure renderer. JPEG exports include an sRGB profile and have a maximum
-long edge of 4096 pixels. This is not a scene-linear or full-resolution workflow.
+## Data safety
 
-Crash-safe sidecar and export publication has real-filesystem coverage on macOS.
-Windows opened-file identity and publication are implemented, with the same
-behavior tests enabled for native CI; native Windows validation remains an open
-Phase 0 evidence row. The app waits for editing workers during normal exit.
-Closing a window with unsaved changes asks whether to keep editing or discard the
-changes.
+Crema opens originals read-only. It can create a new sidecar or update one that
+uses the Crema XMP schema and has an unambiguous association with its original.
+Foreign, malformed, newer, or ambiguous sidecars stay unchanged and make saving
+read-only. Closing with an unsaved exposure change asks whether to keep editing or
+discard it.
 
-See the [Phase 0 status](docs/phase0-status.md) for the current evidence and
-blockers, the [decode prototype reference](docs/decode-prototype.md) for bounds
-and verification, and the [initial plan](docs/initial-plan.md) for the wider
-product scope.
+Export writes `<complete-original-filename>-crema.jpg` beside the source. It
+refuses to replace an existing file. Preview, sidecar save, and export all verify
+that the original still identifies the same file before accepting their result.
 
-Crema's original code is licensed under the [MIT License](LICENSE).
-Third-party dependencies retain their own licenses.
+The persistent cache stores only 320-pixel thumbnails in the platform cache
+directory. Viewer pixels, selection, and unsaved edits remain in memory.
+
+## Image limits
+
+JPEG decoding applies EXIF orientation and converts supported embedded ICC
+profiles to sRGB. RAW uses Rawler's baseline development and does not establish
+camera-specific color or development quality. HEIC accepts only complete 8-bit
+SDR NCLX `[1, 13, 6, 0]` input without an embedded ICC profile. Other HEIC color
+paths fail as unsupported. PNG and TIFF files appear as candidates but do not
+decode yet.
+
+Exposure operates on display-ready 8-bit pixels. The app does not manage display
+profiles, render scene-linear edits, or export full-resolution images. JPEG
+exports have a maximum long edge of 4096 pixels and include an sRGB profile.
+
+## Development
+
+The main checks match CI.
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+python3 -B -m unittest discover -s scripts -p 'test_*.py'
+cargo build --release -p crema-app --bins
+```
+
+The repository also provides `crema-scan`, `crema-probe`,
+`crema-runtime-bench`, and `crema-ui-fixture` for focused evidence collection.
+The [Phase 0 status](docs/phase0-status.md) describes the current evidence command
+and open gates.
+
+Read [architecture.md](architecture.md) for the runtime design,
+[the product roadmap](docs/roadmap.md) for planned work, and
+[the decode reference](docs/decode-prototype.md) for protocol and cache details.
+
+Crema's original code uses the [MIT License](LICENSE). Dependencies retain their
+own licenses.

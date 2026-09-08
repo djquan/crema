@@ -15,7 +15,9 @@ flowchart LR
 
 `crema-image` owns `CandidateFormat`, `RawFormat`, `RasterFormat`, and filename classification. Classification is case-insensitive and based only on the final extension. A classified file is a candidate for later decoding. Classification does not claim that its bytes are valid or supported by a decoder.
 
-`crema-app` supplies `classify_candidate` to `scan_folder`. It also owns argument validation, output, and process exit status. This composition keeps both library crates dependency-free.
+`crema-app` supplies `classify_candidate` to `scan_folder`. It also owns argument
+validation, output, and process exit status. This composition keeps image-format
+and codec policy out of generic filesystem discovery.
 
 The design comparison favored this sibling-crate shape over a `crema-core` dependency on `crema-image`. The function pointer is the only policy input. It keeps format knowledge out of filesystem discovery without adding a trait or callback framework.
 

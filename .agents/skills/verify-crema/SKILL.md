@@ -41,7 +41,8 @@ After proving a feature, record it with the helper. For example:
 
 1. Close Crema through its UI so `gui_exit` and the metrics file are published.
 2. Run `python3 scripts/macos-phase0-app.py finish /tmp/crema-phase0-<run>`.
-3. Inspect `gui-receipt.json`, `macos-app/gui-metrics.tsv`, screenshots, XMP, and exported JPEG.
+3. Inspect `gui-receipt.json`, `macos-app/metrics/gui-metrics-*.tsv`, screenshots,
+   XMP, and the exported JPEG.
 4. Run `python3 scripts/macos-phase0-app.py cleanup /tmp/crema-phase0-<run>` only after inspection. Cleanup removes the disposable app and cache while preserving raw evidence.
 
 If any action, artifact, metric, or native capability is absent, report it as NOT VERIFIED. Do not convert visual plausibility into a pass for color, performance, or assistive technology.

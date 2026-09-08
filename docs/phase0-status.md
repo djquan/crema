@@ -1,15 +1,13 @@
 # Phase 0 status
 
-Phase 0 implementation now spans the complete feasibility path. The release gate
-is not passed. Crema reports missing evidence as blocked instead of treating an
-unavailable camera file, operating system, display, or screen reader as a skipped
-success.
+Phase 0 implements the full feasibility path, but the release gate remains open.
+Crema reports missing evidence as blocked instead of treating an unavailable
+camera file, operating system, display, or screen reader as a skipped success.
 
-The [September 8 code review](reviews/2026-09-08-phase0-review.md) records the
-defects that prompted the current repairs. Its [handoff](phase0-handoff.md) remains
-the acceptance checklist. The repository defects F1 through F8 are fixed; the
-hardware- and fixture-dependent rows below remain open until fresh evidence is
-collected from the repaired source identity.
+The application defects found in the September 8 review have regression coverage
+in the current source. Fresh macOS functional evidence is still required because
+the earlier GUI receipt predates those repairs. The other hardware- and
+fixture-dependent rows below also remain open.
 
 Run the local evidence workflow into a new directory outside the repository:
 
@@ -64,8 +62,9 @@ python3 scripts/verify-phase0.py release /tmp/crema-phase0-release \
 - Native VoiceOver, NVDA, and Orca behavior. AccessKit roles, names, author IDs,
   keyboard focus, and visible focus are implemented, not equivalent to a screen-
   reader session.
-- Native Windows and Linux GUI behavior, native Windows filesystem execution,
-  Linux Wayland and X11, and real-machine GPU/display behavior.
+- Fresh macOS functional GUI evidence, native Windows and Linux GUI behavior,
+  Linux Wayland and X11, and real-machine GPU/display behavior. The current native
+  Windows CI run covers filesystem behavior, but not the GUI.
 - The pre-repair 10,000-item Mac run is historical only. Fresh warm-cache metrics
   must use a unique launch log and pass the fixed 16.667 ms assessor budget after
   raw-log recomputation. Monitor presentation timing, cached next-photo latency,
