@@ -181,15 +181,16 @@ fn stale_job_completion_is_ignored_and_io_failure_stays_visible() {
     session.accept_save(first);
     assert!(matches!(session.save_state(), SaveState::Saving { .. }));
 
-    let parked = directory.path().join("photos-parked");
-    fs::rename(&photos, &parked).unwrap();
-    fs::write(&photos, b"not a directory").unwrap();
-    session.accept_save(store.commit(second));
+    let sidecar = session.sidecar_path().to_owned();
+    session.accept_save(store.commit_guarded(second, || {
+        Err(SaveFailure::Io {
+            path: sidecar,
+            message: "source changed since it was opened".to_owned(),
+        })
+    }));
     assert!(matches!(session.save_state(), SaveState::Failed(_)));
     assert_eq!(session.durable_recipe().exposure().value(), 100);
     assert_eq!(session.recipe().exposure().value(), 200);
-    fs::remove_file(&photos).unwrap();
-    fs::rename(parked, photos).unwrap();
 }
 
 #[test]
