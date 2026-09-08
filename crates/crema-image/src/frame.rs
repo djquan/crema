@@ -116,6 +116,7 @@ impl fmt::Display for Provenance {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Icc {
     Absent,
+    AppliedToSrgb,
     PresentNotApplied,
 }
 
@@ -123,6 +124,7 @@ impl fmt::Display for Icc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Absent => "absent",
+            Self::AppliedToSrgb => "applied-to-srgb",
             Self::PresentNotApplied => "present-not-applied",
         })
     }
@@ -185,6 +187,7 @@ pub enum FailureClass {
     Protocol,
     Codec,
     Cancelled,
+    UnsupportedColor,
 }
 
 impl fmt::Display for FailureClass {
@@ -198,6 +201,7 @@ impl fmt::Display for FailureClass {
             Self::Protocol => "protocol",
             Self::Codec => "codec",
             Self::Cancelled => "cancelled",
+            Self::UnsupportedColor => "unsupported-color",
         })
     }
 }
@@ -223,6 +227,9 @@ impl DecodeError {
     }
     pub(crate) fn codec(message: impl ToString) -> Self {
         Self::new(FailureClass::Codec, message)
+    }
+    pub(crate) fn unsupported_color(message: impl ToString) -> Self {
+        Self::new(FailureClass::UnsupportedColor, message)
     }
 }
 

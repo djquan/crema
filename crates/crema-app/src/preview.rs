@@ -150,7 +150,7 @@ fn stable(source: &File, path: &std::path::Path, before: Option<&SourceStamp>) -
             == Some(before)
 }
 fn cache_key(stamp: &SourceStamp, request: &PreviewRequest) -> Vec<u8> {
-    let mut key = b"crema-renderer-1;edge-320;route-".to_vec();
+    let mut key = b"crema-renderer-2;edge-320;route-".to_vec();
     key.extend(request.format.to_string().as_bytes());
     key.push(0);
     key.extend(&stamp.0);

@@ -12,6 +12,7 @@ use std::{
 
 const REQUEST: &[u8; 8] = b"CREMAREQ";
 const RESPONSE: &[u8; 8] = b"CREMARES";
+const PROTOCOL_VERSION: u16 = 2;
 const META_CAP: usize = 64 * 1024;
 const STRING_CAP: usize = 4096;
 
@@ -267,7 +268,7 @@ fn drain_stderr(mut input: impl Read) -> Vec<u8> {
 fn encode_request(codec: u8, size: PreviewSize, limits: &DecodeLimits, bytes: &[u8]) -> Vec<u8> {
     let mut request = Vec::with_capacity(bytes.len() + 40);
     request.extend_from_slice(REQUEST);
-    request.extend_from_slice(&1u16.to_le_bytes());
+    request.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
     request.extend_from_slice(&[codec, 0]);
     request.extend_from_slice(&size.edge().to_le_bytes());
     request.extend_from_slice(&limits.source_pixels.to_le_bytes());
@@ -366,7 +367,7 @@ impl<R: Read> WireReader<R> {
         Ok(())
     }
     fn version(&mut self) -> Result<(), DecodeError> {
-        if u16::from_le_bytes(self.bytes()?) != 1 {
+        if u16::from_le_bytes(self.bytes()?) != PROTOCOL_VERSION {
             return Err(DecodeError::protocol("unsupported protocol version"));
         }
         Ok(())
@@ -412,6 +413,7 @@ fn encode_response(result: Result<DecodeResult, DecodeError>) -> Result<Vec<u8>,
                 FailureClass::Protocol => 5,
                 FailureClass::Codec => 6,
                 FailureClass::Cancelled => 7,
+                FailureClass::UnsupportedColor => 8,
             });
             let mut message = error.message;
             while message.len() > STRING_CAP {
@@ -461,6 +463,7 @@ fn encode_response(result: Result<DecodeResult, DecodeError>) -> Result<Vec<u8>,
             match result.metadata.icc {
                 Fact::Known(Icc::Absent) => metadata.u8(1),
                 Fact::Known(Icc::PresentNotApplied) => metadata.u8(2),
+                Fact::Known(Icc::AppliedToSrgb) => metadata.u8(3),
                 Fact::Unknown(reason) => {
                     metadata.u8(0);
                     metadata.reason(reason);
@@ -486,7 +489,7 @@ fn encode_response(result: Result<DecodeResult, DecodeError>) -> Result<Vec<u8>,
     }
     let mut response = Vec::new();
     response.extend_from_slice(RESPONSE);
-    response.extend_from_slice(&1u16.to_le_bytes());
+    response.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
     response.push(tag);
     response.extend_from_slice(&(metadata.0.len() as u32).to_le_bytes());
     response.extend_from_slice(&(pixels.len() as u64).to_le_bytes());
@@ -519,6 +522,7 @@ fn decode_response(bytes: &[u8], size: PreviewSize) -> Result<DecodeResult, Deco
             5 => FailureClass::Protocol,
             6 => FailureClass::Codec,
             7 => FailureClass::Cancelled,
+            8 => FailureClass::UnsupportedColor,
             _ => return Err(DecodeError::protocol("unknown failure class")),
         };
         let message = metadata.text()?;
@@ -566,6 +570,7 @@ fn decode_response(bytes: &[u8], size: PreviewSize) -> Result<DecodeResult, Deco
         0 => Fact::Unknown(metadata.reason()?),
         1 => Fact::Known(Icc::Absent),
         2 => Fact::Known(Icc::PresentNotApplied),
+        3 => Fact::Known(Icc::AppliedToSrgb),
         _ => return Err(DecodeError::protocol("unknown ICC tag")),
     };
     let nclx = match metadata.u8()? {
@@ -613,7 +618,8 @@ mod tests {
             .encode(&[100; 18], 2, 3, image::ExtendedColorType::Rgb8)
             .unwrap();
         let size = PreviewSize::new(320).unwrap();
-        let original = crate::decode::jpeg(&jpeg, size, &DecodeLimits::default()).unwrap();
+        let mut original = crate::decode::jpeg(&jpeg, size, &DecodeLimits::default()).unwrap();
+        original.metadata.icc = Fact::Known(Icc::AppliedToSrgb);
         let metadata = original.metadata.clone();
         let pixels = original.preview.rgba8().to_vec();
         let encoded = encode_response(Ok(original)).unwrap();
@@ -621,10 +627,17 @@ mod tests {
         assert_eq!(decoded.metadata, metadata);
         assert_eq!(decoded.preview.rgba8(), pixels);
         assert_eq!(decoded.provenance, Provenance::JpegDecode);
+        assert_eq!(decoded.metadata.icc, Fact::Known(Icc::AppliedToSrgb));
         assert!(decode_response(&encoded, PreviewSize::new(1).unwrap()).is_err());
         let request = encode_request(1, size, &DecodeLimits::default(), b"source");
         assert_eq!(request.len(), 32 + b"source".len());
         assert_eq!(&request[32..], b"source");
+
+        let encoded =
+            encode_response(Err(DecodeError::unsupported_color("PQ needs tone mapping"))).unwrap();
+        let error = decode_response(&encoded, size).unwrap_err();
+        assert_eq!(error.class, FailureClass::UnsupportedColor);
+        assert_eq!(error.message, "PQ needs tone mapping");
     }
 
     #[test]
@@ -638,7 +651,7 @@ mod tests {
         for end in 0..valid.len() {
             assert!(decode_response(&valid[..end], size).is_err());
         }
-        for (offset, value) in [(0, 0), (8, 2), (10, 99), (11, 255), (15, 255)] {
+        for (offset, value) in [(0, 0), (8, 1), (10, 99), (11, 255), (15, 255)] {
             let mut broken = valid.clone();
             broken[offset] = value;
             assert_eq!(

@@ -59,7 +59,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
     parser.add_argument("files", nargs="+", type=Path)
-    parser.add_argument("--binary", type=Path, default=Path("target/release/crema-nitro"))
+    parser.add_argument("--binary", type=Path, default=Path("target/release/crema-runtime-bench"))
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--compare", type=Path)
     parser.add_argument("--with-cancellation", action="store_true")

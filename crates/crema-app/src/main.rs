@@ -2,7 +2,7 @@ use std::{io, path::PathBuf, process::ExitCode};
 
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
-    let root = args.next();
+    let root = args.next().or_else(|| std::env::var_os("CREMA_ROOT"));
     if root.as_deref() == Some(std::ffi::OsStr::new("--crema-decode-worker")) {
         return match crema_image::run_worker(io::stdin().lock(), io::stdout().lock()) {
             Ok(()) => ExitCode::SUCCESS,
@@ -13,7 +13,7 @@ fn main() -> ExitCode {
         };
     }
     let Some(root) = root else {
-        eprintln!("usage: crema <folder>");
+        eprintln!("usage: crema <folder> (or set CREMA_ROOT)");
         return ExitCode::FAILURE;
     };
     if args.next().is_some() {

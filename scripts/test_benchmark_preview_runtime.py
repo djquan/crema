@@ -2,9 +2,12 @@ import importlib.util
 from pathlib import Path
 import unittest
 
-spec = importlib.util.spec_from_file_location("nitro_browser", Path(__file__).with_name("nitro-browser.py"))
-nitro = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(nitro)
+spec = importlib.util.spec_from_file_location(
+    "benchmark_preview_runtime",
+    Path(__file__).with_name("benchmark-preview-runtime.py"),
+)
+benchmark = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(benchmark)
 
 
 class MeasurementsTest(unittest.TestCase):
@@ -12,7 +15,7 @@ class MeasurementsTest(unittest.TestCase):
         events = [{"event": name, "micros": str(micros), "attempt": "1", "value": "1"}
                   for name, micros in [("operation_selected", 0), ("first_usable_received", 10), ("target_received", 100)]]
         with self.assertRaisesRegex(ValueError, "next-photo transition"):
-            nitro.measurements(events, "next")
+            benchmark.measurements(events, "next")
 
     def test_next_photo_excludes_initial_open(self):
         def event(name, micros):
@@ -22,12 +25,15 @@ class MeasurementsTest(unittest.TestCase):
                   event("first_usable_received", 2020), event("target_received", 2300),
                   event("operation_selected", 3000), event("first_usable_received", 3005),
                   event("target_received", 3100)]
-        values = nitro.measurements(events, "next")
+        values = benchmark.measurements(events, "next")
         self.assertEqual(values["first_usable_received_us"], [20, 5])
         self.assertEqual(values["target_received_us"], [300, 100])
         self.assertEqual(values["initial_first_usable_received_us"], [100])
         self.assertEqual(values["initial_target_received_us"], [1000])
-        self.assertEqual(nitro.measurements(events[:3], "viewer")["first_usable_received_us"], [100])
+        self.assertEqual(
+            benchmark.measurements(events[:3], "viewer")["first_usable_received_us"],
+            [100],
+        )
 
 
 if __name__ == "__main__":

@@ -96,13 +96,14 @@ impl Workspace {
         self.selected = Some(self.assets[next].id());
     }
 
-    fn shortcut(&mut self, key: egui::Key, wants_keyboard_input: bool) {
+    fn shortcut(&mut self, key: egui::Key, wants_keyboard_input: bool) -> bool {
+        let selected = self.selected;
         if key == egui::Key::Escape && self.view == View::Viewer {
             self.view = View::Grid;
-            return;
+            return false;
         }
-        if wants_keyboard_input {
-            return;
+        if wants_keyboard_input && self.view == View::Viewer {
+            return false;
         }
         match key {
             egui::Key::ArrowLeft => self.navigate(-1),
@@ -110,7 +111,28 @@ impl Workspace {
             egui::Key::Enter => self.view = View::Viewer,
             _ => {}
         }
+        self.selected != selected
     }
+}
+
+fn thumbnail_access_id(asset: AssetId) -> egui::Id {
+    egui::Id::new(("crema-thumbnail", asset))
+}
+
+fn viewer_access_id(asset: AssetId) -> egui::Id {
+    egui::Id::new(("crema-viewer-image", asset))
+}
+
+fn thumbnail_author_id(asset: AssetId) -> String {
+    format!("thumbnail-{asset}")
+}
+
+fn viewer_author_id(asset: AssetId) -> String {
+    format!("viewer-image-{asset}")
+}
+
+fn reveal_scroll_offset(index: usize, columns: usize, row_height: f32) -> f32 {
+    (index / columns) as f32 * row_height
 }
 
 enum Cached {
@@ -333,6 +355,7 @@ pub struct Browser {
     exports: HashMap<AssetId, ExportState>,
     active_viewer: Option<AssetId>,
     close_confirmation: CloseConfirmation,
+    reveal_selected: bool,
 }
 
 impl Browser {
@@ -393,6 +416,7 @@ impl Browser {
             exports: HashMap::new(),
             active_viewer: None,
             close_confirmation: CloseConfirmation::Inactive,
+            reveal_selected: false,
         }
     }
 
@@ -543,6 +567,13 @@ impl Browser {
             RenderQuality::Settled => pixels.detail.clone(),
         };
         let key = RenderKey::new(asset, snapshot.revision(), epoch, quality);
+        self.metrics.record(
+            "edit_render_requested",
+            Some(viewer),
+            0,
+            0,
+            u64::from(pixels.width()) * u64::from(pixels.height()),
+        );
         self.render_demands.insert(asset, RenderDemand::new(key));
         self.editor
             .replace_render(RenderRequest::new(key, pixels, snapshot));
@@ -557,6 +588,13 @@ impl Browser {
                         continue;
                     }
                     let rendered = result.rendered();
+                    self.metrics.record(
+                        "edit_render_received",
+                        Some(self.key(key.asset(), Purpose::Viewer)),
+                        0,
+                        0,
+                        u64::from(rendered.width()) * u64::from(rendered.height()),
+                    );
                     let image = egui::ColorImage::from_rgba_unmultiplied(
                         [rendered.width() as usize, rendered.height() as usize],
                         rendered.rgba8(),
@@ -581,13 +619,30 @@ impl Browser {
                     );
                 }
                 EditorEvent::Saved(result) => {
+                    let asset = result.asset();
+                    let mut succeeded = false;
                     if let Some(EditorDocument::Ready { session, .. }) =
-                        self.documents.get_mut(&result.asset())
+                        self.documents.get_mut(&asset)
                     {
                         session.accept_save(result.into_completion());
+                        succeeded = !matches!(session.save_state(), SaveState::Failed(_));
                     }
+                    self.metrics.record(
+                        "save_finished",
+                        Some(self.key(asset, Purpose::Viewer)),
+                        0,
+                        0,
+                        u64::from(succeeded),
+                    );
                 }
                 EditorEvent::Exported(result) => {
+                    self.metrics.record(
+                        "export_finished",
+                        Some(self.key(result.asset(), Purpose::Viewer)),
+                        0,
+                        0,
+                        1,
+                    );
                     let exposure = result.snapshot().recipe().exposure().as_stops();
                     let current_is_newer = matches!(
                         self.documents.get(&result.asset()),
@@ -610,6 +665,13 @@ impl Browser {
                     );
                 }
                 EditorEvent::ExportFailed(failure) => {
+                    self.metrics.record(
+                        "export_finished",
+                        Some(self.key(failure.asset(), Purpose::Viewer)),
+                        0,
+                        0,
+                        0,
+                    );
                     self.exports
                         .insert(failure.asset(), ExportState::Failed(failure.to_string()));
                 }
@@ -750,8 +812,11 @@ impl Browser {
         if let Some(quality) = render {
             self.schedule_render(asset, quality);
         }
-        if let Some(request) = save {
-            let _ = self.editor.submit_save(request);
+        if let Some(request) = save
+            && self.editor.submit_save(request).is_ok()
+        {
+            self.metrics
+                .record("save_requested", Some(viewer_key), 0, 0, 1);
         }
         if let Some((source, snapshot)) = export {
             let Some(index) = self.workspace.index.get(&asset).copied() else {
@@ -764,6 +829,9 @@ impl Browser {
                     if let Err(error) = self.editor.submit_export(request) {
                         self.exports
                             .insert(asset, ExportState::Failed(error.to_string()));
+                    } else {
+                        self.metrics
+                            .record("export_requested", Some(viewer_key), 0, 0, 1);
                     }
                 }
                 Err(error) => {
@@ -804,6 +872,13 @@ impl Browser {
                 } if generation == self.workspace.generation => {
                     self.workspace.scanning = false;
                     self.workspace.failures = failures;
+                    self.metrics.record(
+                        "scan_finished",
+                        None,
+                        generation,
+                        0,
+                        self.workspace.assets.len() as u64,
+                    );
                 }
                 Event::ScanFinished { .. } => {}
                 Event::Decoded {
@@ -973,146 +1048,178 @@ impl Browser {
         let row_height = self.thumbnail_width * 0.78 + 50.0;
         let row_count = self.workspace.assets.len().div_ceil(columns);
         let mut demanded = Vec::new();
-        egui::ScrollArea::vertical()
-            .id_salt("photo-grid")
-            .show_rows(ui, row_height, row_count, |ui, rows| {
-                for row in rows {
-                    ui.horizontal(|ui| {
-                        for column in 0..columns {
-                            let index = row * columns + column;
-                            let Some(candidate) = self.workspace.assets.get(index) else {
-                                break;
-                            };
-                            let id = candidate.id();
-                            let filename = candidate
-                                .path()
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .into_owned();
-                            let format = candidate.kind().to_string();
-                            let key = self.key(id, Purpose::Thumbnail);
-                            demanded.push(key);
-                            let selected = self.workspace.selected == Some(id);
-                            let response = ui
-                                .allocate_ui_with_layout(
-                                    Vec2::new(self.thumbnail_width, row_height),
-                                    egui::Layout::top_down(egui::Align::Center),
-                                    |ui| {
-                                        let (rect, mut response) = ui.allocate_exact_size(
-                                            Vec2::new(
-                                                self.thumbnail_width,
-                                                self.thumbnail_width * 0.78,
-                                            ),
-                                            egui::Sense::click(),
-                                        );
-                                        ui.painter().rect_filled(
-                                            rect,
-                                            4.0,
-                                            Color32::from_rgb(20, 21, 20),
-                                        );
-                                        let mut unavailable = None;
-                                        match self.cache.get_mut(&key) {
-                                            Some(Cached::Image { texture, used, .. }) => {
-                                                *used = self.tick;
-                                                let size = texture.size_vec2();
-                                                let scale = (rect.width() / size.x)
-                                                    .min(rect.height() / size.y);
-                                                let target = egui::Rect::from_center_size(
-                                                    rect.center(),
-                                                    size * scale,
-                                                );
-                                                ui.painter().image(
-                                                    texture.id(),
-                                                    target,
-                                                    egui::Rect::from_min_max(
-                                                        egui::Pos2::ZERO,
-                                                        egui::pos2(1.0, 1.0),
-                                                    ),
-                                                    Color32::WHITE,
-                                                );
-                                                if selected && self.drawn.insert(Purpose::Thumbnail)
-                                                {
-                                                    self.metrics.record(
-                                                        "first_selected_draw",
-                                                        Some(key),
-                                                        0,
-                                                        0,
-                                                        1,
-                                                    );
-                                                }
-                                            }
-                                            Some(Cached::Unavailable { reason, used, .. }) => {
-                                                *used = self.tick;
-                                                unavailable = Some(concise_reason(reason));
-                                                ui.painter().text(
-                                                    rect.center(),
-                                                    egui::Align2::CENTER_CENTER,
-                                                    "Preview unavailable",
-                                                    egui::FontId::proportional(13.0),
-                                                    Color32::GRAY,
-                                                );
-                                            }
-                                            None => {
-                                                ui.painter().text(
-                                                    rect.center(),
-                                                    egui::Align2::CENTER_CENTER,
-                                                    "Loading preview",
-                                                    egui::FontId::proportional(13.0),
-                                                    Color32::GRAY,
+        let mut scroll = egui::ScrollArea::vertical().id_salt("photo-grid");
+        if self.reveal_selected
+            && let Some(index) = self
+                .workspace
+                .selected
+                .and_then(|asset| self.workspace.index.get(&asset).copied())
+        {
+            scroll =
+                scroll.vertical_scroll_offset(reveal_scroll_offset(index, columns, row_height));
+        }
+        scroll.show_rows(ui, row_height, row_count, |ui, rows| {
+            for row in rows {
+                ui.horizontal(|ui| {
+                    for column in 0..columns {
+                        let index = row * columns + column;
+                        let Some(candidate) = self.workspace.assets.get(index) else {
+                            break;
+                        };
+                        let id = candidate.id();
+                        let filename = candidate
+                            .path()
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned();
+                        let format = candidate.kind().to_string();
+                        let key = self.key(id, Purpose::Thumbnail);
+                        demanded.push(key);
+                        let selected = self.workspace.selected == Some(id);
+                        let response = ui
+                            .allocate_ui_with_layout(
+                                Vec2::new(self.thumbnail_width, row_height),
+                                egui::Layout::top_down(egui::Align::Center),
+                                |ui| {
+                                    let (_, rect) = ui.allocate_space(Vec2::new(
+                                        self.thumbnail_width,
+                                        self.thumbnail_width * 0.78,
+                                    ));
+                                    let mut response = ui.interact(
+                                        rect,
+                                        thumbnail_access_id(id),
+                                        egui::Sense::click(),
+                                    );
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        4.0,
+                                        Color32::from_rgb(20, 21, 20),
+                                    );
+                                    let mut unavailable = None;
+                                    match self.cache.get_mut(&key) {
+                                        Some(Cached::Image { texture, used, .. }) => {
+                                            *used = self.tick;
+                                            let size = texture.size_vec2();
+                                            let scale =
+                                                (rect.width() / size.x).min(rect.height() / size.y);
+                                            let target = egui::Rect::from_center_size(
+                                                rect.center(),
+                                                size * scale,
+                                            );
+                                            ui.painter().image(
+                                                texture.id(),
+                                                target,
+                                                egui::Rect::from_min_max(
+                                                    egui::Pos2::ZERO,
+                                                    egui::pos2(1.0, 1.0),
+                                                ),
+                                                Color32::WHITE,
+                                            );
+                                            if selected && self.drawn.insert(Purpose::Thumbnail) {
+                                                self.metrics.record(
+                                                    "first_selected_draw",
+                                                    Some(key),
+                                                    0,
+                                                    0,
+                                                    1,
                                                 );
                                             }
                                         }
-                                        if selected {
-                                            ui.painter().rect_stroke(
-                                                rect,
-                                                4.0,
-                                                egui::Stroke::new(
-                                                    2.0,
-                                                    Color32::from_rgb(161, 181, 150),
-                                                ),
-                                                egui::StrokeKind::Inside,
+                                        Some(Cached::Unavailable { reason, used, .. }) => {
+                                            *used = self.tick;
+                                            unavailable = Some(concise_reason(reason));
+                                            ui.painter().text(
+                                                rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "Preview unavailable",
+                                                egui::FontId::proportional(13.0),
+                                                Color32::GRAY,
                                             );
                                         }
-                                        let accessible_name = match unavailable {
-                                            Some(reason) => {
-                                                response = response.on_hover_text(&reason);
-                                                format!("{filename}. Preview unavailable. {reason}")
-                                            }
-                                            None if !self.cache.contains_key(&key) => {
-                                                format!("{filename}. Loading preview")
-                                            }
-                                            None => filename.clone(),
-                                        };
-                                        response.widget_info(|| {
-                                            egui::WidgetInfo::selected(
-                                                egui::WidgetType::Button,
-                                                true,
-                                                selected,
-                                                &accessible_name,
-                                            )
-                                        });
-                                        ui.add(egui::Label::new(&filename).truncate());
-                                        ui.label(
-                                            RichText::new(format).small().color(Color32::GRAY),
+                                        None => {
+                                            ui.painter().text(
+                                                rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "Loading preview",
+                                                egui::FontId::proportional(13.0),
+                                                Color32::GRAY,
+                                            );
+                                        }
+                                    }
+                                    if selected {
+                                        ui.painter().rect_stroke(
+                                            rect,
+                                            4.0,
+                                            egui::Stroke::new(
+                                                2.0,
+                                                Color32::from_rgb(161, 181, 150),
+                                            ),
+                                            egui::StrokeKind::Inside,
                                         );
-                                        response
-                                    },
-                                )
-                                .inner;
-                            if response.clicked() {
-                                self.workspace.selected = Some(id);
-                                self.measure_selection();
-                            }
-                            if response.double_clicked() {
-                                self.workspace.selected = Some(id);
-                                self.workspace.view = View::Viewer;
-                                self.measure_selection();
-                            }
+                                    }
+                                    if selected && self.reveal_selected {
+                                        response.request_focus();
+                                        self.reveal_selected = false;
+                                        self.metrics.record("keyboard_reveal", Some(key), 0, 0, 1);
+                                    }
+                                    if response.has_focus() {
+                                        ui.painter().rect_stroke(
+                                            rect.shrink(3.0),
+                                            3.0,
+                                            egui::Stroke::new(3.0, Color32::WHITE),
+                                            egui::StrokeKind::Inside,
+                                        );
+                                    }
+                                    let accessible_name = match unavailable {
+                                        Some(reason) => {
+                                            response = response.on_hover_text(&reason);
+                                            format!("{filename}. Preview unavailable. {reason}")
+                                        }
+                                        None if !self.cache.contains_key(&key) => {
+                                            format!("{filename}. Loading preview")
+                                        }
+                                        None => filename.clone(),
+                                    };
+                                    response.widget_info(|| {
+                                        egui::WidgetInfo::selected(
+                                            egui::WidgetType::Button,
+                                            true,
+                                            selected,
+                                            &accessible_name,
+                                        )
+                                    });
+                                    ui.ctx().accesskit_node_builder(response.id, |node| {
+                                        node.set_author_id(thumbnail_author_id(id));
+                                    });
+                                    ui.add(egui::Label::new(&filename).truncate());
+                                    ui.label(RichText::new(format).small().color(Color32::GRAY));
+                                    response
+                                },
+                            )
+                            .inner;
+                        if response.clicked() {
+                            self.workspace.selected = Some(id);
+                            self.measure_selection();
                         }
-                    });
-                }
-            });
+                        if response.double_clicked() {
+                            self.workspace.selected = Some(id);
+                            self.workspace.view = View::Viewer;
+                            self.measure_selection();
+                        }
+                    }
+                });
+            }
+        });
+        if let (Some(first), Some(last)) = (demanded.first(), demanded.last()) {
+            self.metrics.record(
+                "grid_visible",
+                None,
+                self.workspace.index[&first.asset] as u64,
+                self.workspace.index[&last.asset] as u64,
+                demanded.len() as u64,
+            );
+        }
         demanded
     }
 
@@ -1123,6 +1230,12 @@ impl Browser {
         let key = self.key(id, Purpose::Viewer);
         let thumbnail = self.key(id, Purpose::Thumbnail);
         let display_key = viewer_display_key(&self.cache, key, thumbnail);
+        let filename = self.workspace.assets[self.workspace.index[&id]]
+            .path()
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         let larger_error = match self.cache.get_mut(&key) {
             Some(Cached::Unavailable { reason, used, .. }) => {
                 *used = self.tick;
@@ -1190,14 +1303,34 @@ impl Browser {
                     egui::ScrollArea::both()
                         .id_salt(("actual-preview", id))
                         .show(ui, |ui| {
-                            ui.add(egui::Image::new((texture.id(), source)));
+                            let response = ui
+                                .push_id(viewer_access_id(id), |ui| {
+                                    ui.add(
+                                        egui::Image::new((texture.id(), source))
+                                            .alt_text(format!("Preview of {filename}")),
+                                    )
+                                })
+                                .inner;
+                            ui.ctx().accesskit_node_builder(response.id, |node| {
+                                node.set_author_id(viewer_author_id(id));
+                            });
                         });
                 } else {
                     let scale = (available.x / source.x)
                         .min(available.y / source.y)
                         .max(0.01);
                     ui.centered_and_justified(|ui| {
-                        ui.add(egui::Image::new((texture.id(), source * scale)));
+                        let response = ui
+                            .push_id(viewer_access_id(id), |ui| {
+                                ui.add(
+                                    egui::Image::new((texture.id(), source * scale))
+                                        .alt_text(format!("Preview of {filename}")),
+                                )
+                            })
+                            .inner;
+                        ui.ctx().accesskit_node_builder(response.id, |node| {
+                            node.set_author_id(viewer_author_id(id));
+                        });
                     });
                 }
                 if self.drawn.insert(display_key.purpose) {
@@ -1239,6 +1372,7 @@ impl eframe::App for Browser {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let frame_started = Instant::now();
         self.tick += 1;
         self.handle_close(ui.ctx());
         egui::CentralPanel::default().show(ui, |ui| {
@@ -1285,8 +1419,10 @@ impl eframe::App for Browser {
                 egui::Key::Enter,
                 egui::Key::Escape,
             ] {
-                if ui.input(|input| input.key_pressed(key)) {
-                    self.workspace.shortcut(key, wants_keyboard_input);
+                if ui.input(|input| input.key_pressed(key))
+                    && self.workspace.shortcut(key, wants_keyboard_input)
+                {
+                    self.reveal_selected = true;
                 }
             }
             ui.horizontal(|ui| {
@@ -1343,6 +1479,22 @@ impl eframe::App for Browser {
             };
             self.demand(demands);
         });
+        self.metrics.record(
+            "gui_frame_us",
+            self.workspace.selected.map(|asset| {
+                self.key(
+                    asset,
+                    if self.workspace.view == View::Viewer {
+                        Purpose::Viewer
+                    } else {
+                        Purpose::Thumbnail
+                    },
+                )
+            }),
+            0,
+            0,
+            frame_started.elapsed().as_micros() as u64,
+        );
     }
 }
 
@@ -1390,23 +1542,32 @@ mod tests {
         workspace.navigate(999);
         assert_eq!(workspace.selected, Some(workspace.assets[1].id()));
         workspace.navigate(-1);
-        let first = workspace.selected;
-        for key in [
-            egui::Key::ArrowLeft,
-            egui::Key::ArrowRight,
-            egui::Key::Enter,
-        ] {
-            workspace.shortcut(key, true);
-        }
-        assert_eq!(workspace.selected, first);
-        assert_eq!(workspace.view, View::Grid);
-        workspace.shortcut(egui::Key::Enter, false);
+        assert!(workspace.shortcut(egui::Key::ArrowRight, true));
+        assert_eq!(workspace.selected, Some(workspace.assets[1].id()));
+        workspace.navigate(-1);
+        workspace.shortcut(egui::Key::Enter, true);
         assert_eq!(workspace.view, View::Viewer);
+        let first = workspace.selected;
+        assert!(!workspace.shortcut(egui::Key::ArrowRight, true));
+        assert_eq!(workspace.selected, first);
         workspace.shortcut(egui::Key::Escape, true);
         assert_eq!(workspace.view, View::Grid);
-        workspace.shortcut(egui::Key::ArrowRight, false);
+        assert!(workspace.shortcut(egui::Key::ArrowRight, false));
         assert_eq!(workspace.selected, Some(workspace.assets[1].id()));
+        assert!(!workspace.shortcut(egui::Key::ArrowRight, false));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn accessibility_ids_and_keyboard_reveal_are_stable() {
+        let first = test_asset();
+        let second = test_asset();
+        assert_eq!(thumbnail_access_id(first), thumbnail_access_id(first));
+        assert_ne!(thumbnail_access_id(first), thumbnail_access_id(second));
+        assert_ne!(thumbnail_access_id(first), viewer_access_id(first));
+        assert_eq!(thumbnail_author_id(first), format!("thumbnail-{first}"));
+        assert_eq!(viewer_author_id(first), format!("viewer-image-{first}"));
+        assert_eq!(reveal_scroll_offset(7, 3, 100.0), 200.0);
     }
 
     fn test_asset() -> AssetId {
@@ -1549,6 +1710,7 @@ mod tests {
             exports: HashMap::new(),
             active_viewer: None,
             close_confirmation: CloseConfirmation::Inactive,
+            reveal_selected: false,
         };
         let thumbnail = browser.key(asset, Purpose::Thumbnail);
         let viewer = browser.key(asset, Purpose::Viewer);
@@ -1696,6 +1858,7 @@ mod tests {
             FailureClass::InvalidInput,
             FailureClass::Protocol,
             FailureClass::LimitExceeded,
+            FailureClass::UnsupportedColor,
         ] {
             assert!(
                 !Cached::Unavailable {
@@ -1798,6 +1961,7 @@ mod tests {
             exports: HashMap::new(),
             active_viewer: None,
             close_confirmation: CloseConfirmation::Inactive,
+            reveal_selected: false,
         };
         let count = Arc::new(AtomicUsize::new(0));
         let observed = count.clone();

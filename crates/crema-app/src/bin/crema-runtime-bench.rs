@@ -71,7 +71,7 @@ fn ready(
 }
 fn run(args: Vec<std::ffi::OsString>) -> Result<(), String> {
     if args.len() < 4 {
-        return Err("usage: crema-nitro <thumbnail|viewer|next|cancel|aba|pressure> <cache-root|-> <events.tsv> <photo> [photo...]".into());
+        return Err("usage: crema-runtime-bench <thumbnail|viewer|next|cancel|aba|pressure> <cache-root|-> <events.tsv> <photo> [photo...]".into());
     }
     let scenario = args[0].to_string_lossy();
     if scenario == "next" && args.len() < 5 {

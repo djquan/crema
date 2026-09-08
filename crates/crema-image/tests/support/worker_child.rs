@@ -9,7 +9,7 @@ fn main() {
         "truncated" => io::stdout().write_all(b"CREMARES").unwrap(),
         "oversized" => {
             let mut output = b"CREMARES".to_vec();
-            output.extend_from_slice(&1u16.to_le_bytes());
+            output.extend_from_slice(&2u16.to_le_bytes());
             output.push(0);
             output.extend_from_slice(&u32::MAX.to_le_bytes());
             output.extend_from_slice(&u64::MAX.to_le_bytes());

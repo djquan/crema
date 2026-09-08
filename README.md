@@ -18,6 +18,7 @@ Originals remain untouched. PNG and TIFF candidates appear as unsupported.
 cargo run --release -p crema-app --bin crema -- /path/to/photos
 cargo run -p crema-app --bin crema-scan -- /path/to/photos
 cargo run --release -p crema-app --bin crema-probe -- /path/to/photos
+python3 scripts/verify-phase0.py mac-local /tmp/crema-phase0 /path/to/photo.jpg /path/to/photo.heic /path/to/photo.raf /path/to/photo.orf
 ```
 
 Click a thumbnail to select it. Double-click or press Enter to open the viewer.
@@ -37,8 +38,11 @@ The probe writes a TSV record for every attempted decode and continues after err
 Add `--fail-on-decode-error` to return status 2 when any decode fails. `--output`
 creates a new report file and refuses to overwrite an existing file.
 
-Color rendering is experimental. Embedded ICC profiles are reported but not
-applied, HEIC HDR is not tone-mapped, and display profiles are not managed.
+Color rendering is experimental. Embedded JPEG ICC profiles are converted to
+sRGB. HEIC decoding accepts only verified 8-bit SDR transfer paths without an
+embedded ICC profile; high-bit, HDR, unknown-transfer, and hidden-profile inputs
+fail as unsupported instead of being displayed with guessed color. Display
+profiles are not managed.
 RAW previews use Rawler's baseline development. Successful pixels do not establish
 camera-mode coverage or rendering quality. Exposure works on the decoder's
 display-ready 8-bit output under an sRGB assumption. Preview and export use the
@@ -50,8 +54,10 @@ Windows source identity and durable folder publication still need implementation
 and validation. The app waits for editing workers during normal exit. Closing a
 window with unsaved changes asks whether to keep editing or discard the changes.
 
-See the [decode prototype reference](docs/decode-prototype.md) for bounds and
-verification, and the [initial plan](docs/initial-plan.md) for the wider product scope.
+See the [Phase 0 status](docs/phase0-status.md) for the current evidence and
+blockers, the [decode prototype reference](docs/decode-prototype.md) for bounds
+and verification, and the [initial plan](docs/initial-plan.md) for the wider
+product scope.
 
 Crema's original code is licensed under the [MIT License](LICENSE).
 Third-party dependencies retain their own licenses.

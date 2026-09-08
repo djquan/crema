@@ -194,7 +194,7 @@ fn persistent_thumbnail_is_reused_by_a_fresh_real_process() {
     let original = fs::read(&source).unwrap();
     for name in ["cold", "warm", "viewer"] {
         let metric_path = root.0.join(format!("{name}.tsv"));
-        let output = Command::new(env!("CARGO_BIN_EXE_crema-nitro"))
+        let output = Command::new(env!("CARGO_BIN_EXE_crema-runtime-bench"))
             .arg(if name == "viewer" {
                 "viewer"
             } else {
@@ -225,7 +225,7 @@ fn persistent_thumbnail_is_reused_by_a_fresh_real_process() {
             assert!(!metrics.contains("\tworker_spawned\t"));
         }
     }
-    let rejected = Command::new(env!("CARGO_BIN_EXE_crema-nitro"))
+    let rejected = Command::new(env!("CARGO_BIN_EXE_crema-runtime-bench"))
         .arg("next")
         .arg(root.0.join("cache"))
         .arg(root.0.join("invalid-next.tsv"))

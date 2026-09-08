@@ -12,7 +12,7 @@ use std::{
 
 pub const DEFAULT_BUDGET: u64 = 512 * 1024 * 1024;
 const MAX_RECORD: u64 = 320 * 320 * 4 + 64 * 1024;
-const MAGIC: &[u8; 8] = b"CRMATHM1";
+const MAGIC: &[u8; 8] = b"CRMATHM2";
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 pub fn checksum(bytes: &[u8]) -> u64 {
@@ -276,7 +276,7 @@ fn encode_record(key: &[u8], result: &DecodeResult) -> Option<Vec<u8>> {
         return None;
     }
     let mut bytes = MAGIC.to_vec();
-    bytes.extend(1u32.to_le_bytes());
+    bytes.extend(2u32.to_le_bytes());
     bytes.extend((key.len() as u32).to_le_bytes());
     bytes.extend(key);
     for value in [result.preview.width(), result.preview.height()]
@@ -302,7 +302,9 @@ fn encode_record(key: &[u8], result: &DecodeResult) -> Option<Vec<u8>> {
         Orientation::Unknown(value) => bytes.extend([unknown(value), 0]),
     }
     match result.metadata.icc {
-        Fact::Known(value) => bytes.extend([0, if value == Icc::Absent { 0 } else { 1 }]),
+        Fact::Known(Icc::Absent) => bytes.extend([0, 0]),
+        Fact::Known(Icc::PresentNotApplied) => bytes.extend([0, 1]),
+        Fact::Known(Icc::AppliedToSrgb) => bytes.extend([0, 2]),
         Fact::Unknown(value) => bytes.extend([unknown(value), 0]),
     }
     bytes.push(u8::from(result.metadata.nclx.is_some()));
@@ -349,7 +351,7 @@ fn decode_record(bytes: &[u8], key: &[u8]) -> Option<DecodeResult> {
         return None;
     }
     let mut reader = Reader(body);
-    if reader.take(8)? != MAGIC || reader.u32()? != 1 {
+    if reader.take(8)? != MAGIC || reader.u32()? != 2 {
         return None;
     }
     let key_len = reader.u32()? as usize;
@@ -405,6 +407,7 @@ fn decode_record(bytes: &[u8], key: &[u8]) -> Option<DecodeResult> {
         Fact::Known(match value {
             0 => Icc::Absent,
             1 => Icc::PresentNotApplied,
+            2 => Icc::AppliedToSrgb,
             _ => return None,
         })
     } else {
@@ -516,7 +519,7 @@ mod tests {
         fs::write(&path, corrupt).unwrap();
         assert!(cache.load(b"key").is_none());
         let mut obsolete = original.clone();
-        obsolete[8] = 2;
+        obsolete[8] = 1;
         let end = obsolete.len() - 8;
         let hash = checksum(&obsolete[..end]);
         obsolete[end..].copy_from_slice(&hash.to_le_bytes());
@@ -535,6 +538,18 @@ mod tests {
         fs::write(&path, original).unwrap();
         assert!(cache.load(b"key").is_some());
         assert!(decode_record(&fs::read(path).unwrap(), b"collision").is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn applied_icc_state_survives_cache_restart() {
+        let (root, mut result) = fixture();
+        result.metadata.icc = Fact::Known(Icc::AppliedToSrgb);
+        let cache = ThumbnailCache::new(Some(root.join("cache")), DEFAULT_BUDGET);
+        assert!(cache.store(b"profiled", &result));
+        assert_eq!(
+            cache.load(b"profiled").unwrap().metadata.icc,
+            Fact::Known(Icc::AppliedToSrgb)
+        );
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

@@ -75,7 +75,7 @@ one retry. No full source-content hash runs on cache lookup. Deliberately restor
 identity and timestamps can still produce a stale hit. Platforms without the
 opened-file identity adapter disable persistence and retain normal decode behavior.
 
-The immutable `CRMATHM1` container is independent of the worker protocol. It stores
+The immutable `CRMATHM2` container is independent of worker protocol version 2. It stores
 the complete key, bounded source facts, pixels, and an FNV-1a checksum. Readers cap
 the file at 320 × 320 × 4 bytes plus 64 KiB before allocation. Corruption, truncation,
 obsolete schema, mismatched keys, and oversized files are misses. Invalid owned
@@ -124,7 +124,7 @@ python3 scripts/verify-decode.py /tmp/crema-proof /path/to/photo.ORF /path/to/ph
 
 ## Browser measurements
 
-`crema-nitro` drives the same `PreviewRuntime` as the GUI in a fresh real process.
+`crema-runtime-bench` drives the same `PreviewRuntime` as the GUI in a fresh real process.
 It reports runtime readiness and receipt, not rendered frames. The runner accepts
 `thumbnail`, `viewer`, `next`, `cancel`, `aba`, and `pressure` scenarios. Cancellation
 scenarios require a RAW or HEIF first fixture and wait for its actual worker spawn.
@@ -134,8 +134,8 @@ Next-photo scenarios require at least two fixtures and a completed transition.
 
 ```sh
 cargo build --release -p crema-app --bins
-python3 scripts/nitro-browser.py /tmp/crema-browser-baseline --samples 5 --with-cancellation /path/to/photo.ORF /path/to/photo.jpg /path/to/photo.HEIC
-python3 scripts/nitro-browser.py /tmp/crema-browser-after --samples 5 --with-cancellation --compare /tmp/crema-browser-baseline /path/to/photo.ORF /path/to/photo.jpg /path/to/photo.HEIC
+python3 scripts/benchmark-preview-runtime.py /tmp/crema-browser-baseline --samples 5 --with-cancellation /path/to/photo.ORF /path/to/photo.jpg /path/to/photo.HEIC
+python3 scripts/benchmark-preview-runtime.py /tmp/crema-browser-after --samples 5 --with-cancellation --compare /tmp/crema-browser-baseline /path/to/photo.ORF /path/to/photo.jpg /path/to/photo.HEIC
 ```
 
 The output directory must be new and outside the repository and source folders.
@@ -177,6 +177,12 @@ These timestamps do not claim when the monitor shows the frame. The event buffer
 is capped at 100,000 records and reports dropped events. Overflow invalidates a
 benchmark sample. No screenshot or private pixel artifact enters the repository.
 
+`gui_frame_us`, `edit_render_requested`, `edit_render_received`,
+`save_requested`, `save_finished`, `export_requested`, and `export_finished`
+separate UI-frame work from edit and publication latency. Phase 0's macOS helper
+requires these events alongside real UI observations before it writes a GUI
+receipt.
+
 Tests generate JPEG pixels, embed EXIF and ICC segments, exercise all eight
 orientation transforms, reject invalid pixel shapes and protocol frames, and run
 real child processes for truncated frames, oversized frames, exit failures,
@@ -201,10 +207,17 @@ as preview, embeds an sRGB ICC profile, and refuses to replace an existing outpu
 The output name is `<original complete filename>-crema.jpg`. The UI labels this
 path `SDR JPEG, max 4096 px`.
 
+Embedded JPEG ICC profiles are parsed and converted to standard sRGB before the
+shared exposure renderer. Invalid or unsupported profiles fail closed. HEIC is
+accepted only when the decoder returns 8-bit pixels, no inaccessible ICC profile,
+and a declared, verified SDR transfer code. Other HEIC color
+paths return `unsupported-color`; Crema does not silently truncate high-bit input
+or treat HDR as SDR.
+
 This slice does not establish the full Phase 0 release gate. RAF modes, broad RAW
-coverage, progressive JPEG fixtures, HEIC HDR and high-bit-depth variants, color
-accuracy, Windows source identity and durable folder publication, full-resolution
-zoom, and foreign XMP import need separate evidence. Crash-safe sidecar and export
-publication has real-filesystem coverage on macOS. Private source photographs and
-their pixels are not repository fixtures. Rawler keeps its LGPL license
-independently of Crema's MIT license.
+coverage, progressive JPEG fixtures, HEIC HDR and high-bit-depth conversion,
+display color accuracy, native Windows/Linux UI behavior, and native assistive
+technology still need evidence. Foreign XMP import is deliberately deferred.
+Crash-safe sidecar and export publication has real-filesystem coverage on macOS.
+Private source photographs and their pixels are not repository fixtures. Rawler
+keeps its LGPL license independently of Crema's MIT license.
