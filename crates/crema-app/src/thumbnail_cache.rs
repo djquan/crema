@@ -1,3 +1,4 @@
+use crate::platform::SourceStamp;
 use crema_image::{
     DecodeResult, Fact, Icc, Orientation, PreviewPixels, PreviewSize, Provenance, SourceMetadata,
     UnknownReason,
@@ -79,20 +80,18 @@ pub struct ThumbnailCache {
     root: Option<PathBuf>,
     budget: u64,
 }
-fn remove_if_same_file(path: &std::path::Path, opened: &fs::Metadata) {
-    #[cfg(unix)]
+fn remove_if_same_file(path: &std::path::Path, opened: &SourceStamp) {
+    let Ok(current) = File::open(path) else {
+        return;
+    };
+    let current_stamp = SourceStamp::read(&current);
+    drop(current);
+    if current_stamp
+        .as_ref()
+        .is_ok_and(|current| current == opened)
     {
-        use std::os::unix::fs::MetadataExt;
-        if let Ok(current) = fs::symlink_metadata(path)
-            && current.is_file()
-            && current.dev() == opened.dev()
-            && current.ino() == opened.ino()
-        {
-            let _ = fs::remove_file(path);
-        }
+        let _ = fs::remove_file(path);
     }
-    #[cfg(not(unix))]
-    let _ = (path, opened);
 }
 impl ThumbnailCache {
     pub fn new(root: Option<PathBuf>, budget: u64) -> Self {
@@ -118,10 +117,13 @@ impl ThumbnailCache {
         }
         let mut file = File::open(&path).ok()?;
         let opened = file.metadata().ok()?;
+        let opened_stamp = SourceStamp::read(&file).ok();
         let len = opened.len();
         if !(24..=MAX_RECORD).contains(&len) {
             drop(file);
-            remove_if_same_file(&path, &opened);
+            if let Some(opened_stamp) = &opened_stamp {
+                remove_if_same_file(&path, opened_stamp);
+            }
             return None;
         }
         let mut bytes = Vec::with_capacity(len as usize);
@@ -129,12 +131,16 @@ impl ThumbnailCache {
         drop(file);
         read.ok()?;
         if bytes.len() as u64 != len {
-            remove_if_same_file(&path, &opened);
+            if let Some(opened_stamp) = &opened_stamp {
+                remove_if_same_file(&path, opened_stamp);
+            }
             return None;
         }
         let result = decode_record(&bytes, key);
-        if result.is_none() {
-            remove_if_same_file(&path, &opened);
+        if result.is_none()
+            && let Some(opened_stamp) = &opened_stamp
+        {
+            remove_if_same_file(&path, opened_stamp);
         }
         result
     }
@@ -573,7 +579,6 @@ mod tests {
         }
         fs::remove_dir_all(root).unwrap();
     }
-    #[cfg(unix)]
     #[test]
     fn corrupt_cleanup_preserves_a_concurrently_published_replacement() {
         let (root, result) = fixture();
@@ -582,7 +587,7 @@ mod tests {
         let path = cache.path(b"key").unwrap();
         fs::write(&path, b"corrupt").unwrap();
         let opened = File::open(&path).unwrap();
-        let stale_identity = opened.metadata().unwrap();
+        let stale_identity = SourceStamp::read(&opened).unwrap();
         drop(opened);
         let replacement = path.with_extension("replacement");
         fs::write(&replacement, encode_record(b"key", &result).unwrap()).unwrap();
@@ -597,7 +602,7 @@ mod tests {
             result.preview.rgba8()
         );
         let opened = File::open(&path).unwrap();
-        let current_identity = opened.metadata().unwrap();
+        let current_identity = SourceStamp::read(&opened).unwrap();
         drop(opened);
         remove_if_same_file(&path, &current_identity);
         assert!(
