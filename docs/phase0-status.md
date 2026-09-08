@@ -5,6 +5,12 @@ is not passed. Crema reports missing evidence as blocked instead of treating an
 unavailable camera file, operating system, display, or screen reader as a skipped
 success.
 
+The [September 8 code review](reviews/2026-09-08-phase0-review.md) records the
+defects that prompted the current repairs. Its [handoff](phase0-handoff.md) remains
+the acceptance checklist. The repository defects F1 through F8 are fixed; the
+hardware- and fixture-dependent rows below remain open until fresh evidence is
+collected from the repaired source identity.
+
 Run the local evidence workflow into a new directory outside the repository:
 
 ```sh
@@ -38,6 +44,11 @@ python3 scripts/verify-phase0.py release /tmp/crema-phase0-release \
   closed.
 - Non-destructive exposure preview, Crema-owned XMP save/reopen, profiled JPEG
   export, original-file integrity checks, and real-filesystem publication tests.
+- Schema-2 sidecars bind edits to one original and block ambiguous same-stem RAW
+  ownership, including conflicts introduced immediately before publication.
+- Windows opened-file identity and cross-platform sidecar publication. The same
+  save, export, replacement, collision, and original-integrity behavior tests are
+  enabled on every supported operating system.
 - A pinned Rust 1.95 contract and native macOS, Windows, and Linux CI jobs.
 - One create-only evidence command, deterministic profiled JPEG generator, real
   macOS app-bundle helper, source-bound performance receipts, and project-local UI
@@ -53,20 +64,22 @@ python3 scripts/verify-phase0.py release /tmp/crema-phase0-release \
 - Native VoiceOver, NVDA, and Orca behavior. AccessKit roles, names, author IDs,
   keyboard focus, and visible focus are implemented, not equivalent to a screen-
   reader session.
-- Native Windows and Linux GUI behavior, Windows file identity/durable publication,
+- Native Windows and Linux GUI behavior, native Windows filesystem execution,
   Linux Wayland and X11, and real-machine GPU/display behavior.
-- Cached scrolling with a 10,000-item index met the local Mac UI-work budget in a
-  release build. A warm-cache run recorded 1,057 frames with 402 us p95 work,
-  1.237 ms maximum work, and no frame above 16.667 ms. Monitor presentation timing,
-  cached next-photo latency, exposure-response latency, and bounded memory growth
-  on declared release hardware remain explicit release blockers. No producer exists
-  for those three receipts yet.
+- The pre-repair 10,000-item Mac run is historical only. Fresh warm-cache metrics
+  must use a unique launch log and pass the fixed 16.667 ms assessor budget after
+  raw-log recomputation. Monitor presentation timing, cached next-photo latency,
+  exposure-response latency, and bounded memory growth on declared release
+  hardware remain explicit release blockers. No producer exists for those three
+  receipts yet.
 
 ## Dependency and scope decisions
 
-The dependency set remains the user-confirmed Phase 0 set in `Cargo.lock`. Crema's
-owned code remains MIT, while dependencies retain their licenses. Process isolation
-limits decoder failures but does not change Rawler's LGPL obligations.
+The dependency set remains pinned in `Cargo.lock`. A source-bound reviewed
+dependency approval record is still required; the verifier reports that row as
+blocked instead of inferring approval from lockfile metadata. Crema's owned code
+remains MIT, while dependencies retain their licenses. Process isolation limits
+decoder failures but does not change Rawler's LGPL obligations.
 Final distributable notices, source offer, and relinking artifacts belong to the
 release-hardening phase rather than this feasibility gate.
 

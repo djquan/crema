@@ -21,28 +21,30 @@ class MacosEvidenceTest(unittest.TestCase):
         binary.parent.mkdir(parents=True)
         binary.write_bytes(b"binary")
         (work / "session.json").write_text(
-            json.dumps({"source": {}, "fixture_hashes": {}})
+            json.dumps({"source": {}, "host": {"system": "Darwin"}, "fixture_hashes": {}})
         )
+        metrics = work / "metrics"
+        metrics.mkdir()
         rows = [
-            "micros\tevent\tasset\tpurpose\tgeneration\tinterest\tattempt\tvalue\n"
-            f"1\tscan_finished\t\t\t1\t0\t0\t{indexed}\n"
-            "2\tcache_hit\t1\tThumbnail\t1\t1\t1\t1\n"
+            "session_id\tmicros\tevent\tasset\tpurpose\tgeneration\tinterest\tattempt\tvalue\n"
+            f"performance\t1\tscan_finished\t\t\t1\t0\t0\t{indexed}\n"
+            "performance\t2\tcache_hit\t1\tThumbnail\t1\t1\t1\t1\n"
         ]
         rows.extend(
-            f"{index + 3}\tgui_frame_us\t\t\t0\t0\t0\t400\n"
+            f"performance\t{index + 3}\tgui_frame_us\t\t\t0\t0\t0\t400\n"
             for index in range(100)
         )
         rows.extend(
-            f"{index + 103}\tgrid_visible\t\t\t0\t{index * 30}\t{index * 30 + 24}\t25\n"
+            f"performance\t{index + 103}\tgrid_visible\t\t\t0\t{index * 30}\t{index * 30 + 24}\t25\n"
             for index in range(20)
         )
         rows.extend(
             [
-                "123\tgui_exit\t\t\t0\t0\t0\t1\n",
-                "124\tmetrics_dropped\t\t\t0\t0\t0\t0\n",
+                "performance\t123\tgui_exit\t\t\t0\t0\t0\t1\n",
+                "performance\t124\tmetrics_dropped\t\t\t0\t0\t0\t0\n",
             ]
         )
-        (work / "gui-metrics.tsv").write_text("".join(rows))
+        (metrics / "gui-metrics-performance.tsv").write_text("".join(rows))
 
     def test_performance_receipt_uses_scan_complete_count(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -57,8 +59,15 @@ class MacosEvidenceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.make_evidence(root, 9_999)
-            with self.assertRaisesRegex(ValueError, "10000 indexed photos"):
+            with self.assertRaisesRegex(ValueError, "indexed 10000 photos"):
                 macos.performance(root)
+
+    def test_gui_receipt_rejects_one_reused_launch_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_evidence(root, 10_000)
+            with self.assertRaisesRegex(ValueError, "separate save and restore launches"):
+                macos.finish(root)
 
     def test_observation_is_create_only(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -2,7 +2,8 @@ use crema_core::edit::{
     EditCommand, EditRecipe, EditRevision, EditSession, ExposureCentistops, SaveState,
 };
 use crema_core::sidecar::{
-    ConflictKind, SaveFailure, SidecarBlockReason, SidecarLocation, SidecarNaming, SidecarStore,
+    ConflictKind, SaveFailure, SidecarBlockReason, SidecarLocation, SidecarLocator, SidecarNaming,
+    SidecarStore,
 };
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
@@ -11,6 +12,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const GOLDEN_XMP: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about="" xmlns:crema="urn:crema:xmp:edit" crema:owner="Crema" crema:schemaVersion="2" crema:sourceFileName="photo.JPG" crema:exposureCentistops="35"/>
+  </rdf:RDF>
+</x:xmpmeta>
+"#;
+
+const LEGACY_XMP: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/">
   <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
     <rdf:Description rdf:about="" xmlns:crema="urn:crema:xmp:edit" crema:owner="Crema" crema:schemaVersion="1" crema:exposureCentistops="35"/>
@@ -42,8 +51,23 @@ impl Drop for TestDirectory {
     }
 }
 
-fn location(directory: &TestDirectory, name: &str, naming: SidecarNaming) -> SidecarLocation {
-    SidecarLocation::for_original(&directory.path().join(name), naming).unwrap()
+fn classify_sidecar(path: &Path) -> Option<SidecarNaming> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "raf" | "orf" => Some(SidecarNaming::ReplaceOriginalExtension),
+        "jpg" | "jpeg" | "dng" => Some(SidecarNaming::AppendXmpExtension),
+        _ => None,
+    }
+}
+
+fn location(directory: &TestDirectory, name: &str, naming: SidecarNaming) -> SidecarLocator {
+    SidecarLocator::new(&directory.path().join(name), naming, classify_sidecar)
+}
+
+fn sidecar_path(directory: &TestDirectory, name: &str, naming: SidecarNaming) -> PathBuf {
+    SidecarLocation::for_original(&directory.path().join(name), naming)
+        .unwrap()
+        .sidecar()
+        .to_owned()
 }
 
 fn hash(bytes: &[u8]) -> u64 {
@@ -137,13 +161,11 @@ fn stale_job_completion_is_ignored_and_io_failure_stays_visible() {
     fs::create_dir(&photos).unwrap();
     let store = SidecarStore;
     let open = store
-        .open(
-            SidecarLocation::for_original(
-                &photos.join("photo.JPG"),
-                SidecarNaming::AppendXmpExtension,
-            )
-            .unwrap(),
-        )
+        .open(SidecarLocator::new(
+            &photos.join("photo.JPG"),
+            SidecarNaming::AppendXmpExtension,
+            classify_sidecar,
+        ))
         .unwrap();
     let mut session = EditSession::open(open);
     session.apply(EditCommand::SetExposure(
@@ -170,7 +192,6 @@ fn stale_job_completion_is_ignored_and_io_failure_stays_visible() {
     fs::rename(parked, photos).unwrap();
 }
 
-#[cfg(unix)]
 #[test]
 fn publication_guard_runs_after_temp_sync_and_before_sidecar_publish() {
     let directory = TestDirectory::new("publication-guard");
@@ -179,7 +200,11 @@ fn publication_guard_runs_after_temp_sync_and_before_sidecar_publish() {
     fs::write(&source, b"original").unwrap();
     let store = SidecarStore;
     let open = store
-        .open(SidecarLocation::for_original(&source, SidecarNaming::AppendXmpExtension).unwrap())
+        .open(SidecarLocator::new(
+            &source,
+            SidecarNaming::AppendXmpExtension,
+            classify_sidecar,
+        ))
         .unwrap();
     let mut session = EditSession::open(open);
     let sidecar = session.sidecar_path().to_owned();
@@ -218,11 +243,17 @@ fn writes_the_exact_owned_packet_and_reopens_it() {
     let original = b"not really a jpeg, but never writable";
     fs::write(&source, original).unwrap();
     let original_hash = hash(original);
-    let location =
-        SidecarLocation::for_original(&source, SidecarNaming::AppendXmpExtension).unwrap();
-    let sidecar = location.sidecar().to_owned();
+    let sidecar = sidecar_path(&directory, "photo.JPG", SidecarNaming::AppendXmpExtension);
     let store = SidecarStore;
-    let mut session = EditSession::open(store.open(location).unwrap());
+    let mut session = EditSession::open(
+        store
+            .open(SidecarLocator::new(
+                &source,
+                SidecarNaming::AppendXmpExtension,
+                classify_sidecar,
+            ))
+            .unwrap(),
+    );
 
     session.apply(EditCommand::SetExposure(
         ExposureCentistops::new(35).unwrap(),
@@ -235,14 +266,29 @@ fn writes_the_exact_owned_packet_and_reopens_it() {
     assert_eq!(fs::read(&source).unwrap(), original);
     assert_eq!(hash(&fs::read(&source).unwrap()), original_hash);
 
+    session.apply(EditCommand::SetExposure(
+        ExposureCentistops::new(-125).unwrap(),
+    ));
+    let replacement = session.begin_save().unwrap().unwrap();
+    session.accept_save(store.commit(replacement));
+    assert_eq!(session.save_state(), SaveState::Saved);
+    assert!(
+        fs::read_to_string(&sidecar)
+            .unwrap()
+            .contains("crema:exposureCentistops=\"-125\"")
+    );
+    assert_eq!(fs::read(&source).unwrap(), original);
+
     let reopened = EditSession::open(
         store
-            .open(
-                SidecarLocation::for_original(&source, SidecarNaming::AppendXmpExtension).unwrap(),
-            )
+            .open(SidecarLocator::new(
+                &source,
+                SidecarNaming::AppendXmpExtension,
+                classify_sidecar,
+            ))
             .unwrap(),
     );
-    assert_eq!(reopened.recipe().exposure().value(), 35);
+    assert_eq!(reopened.recipe().exposure().value(), -125);
     assert_eq!(reopened.save_state(), SaveState::Saved);
 }
 
@@ -250,7 +296,7 @@ fn writes_the_exact_owned_packet_and_reopens_it() {
 fn accepts_prefix_and_whitespace_variations_then_canonicalizes_on_save() {
     let directory = TestDirectory::new("xmp-prefix");
     let location = location(&directory, "photo.JPG", SidecarNaming::AppendXmpExtension);
-    let sidecar = location.sidecar().to_owned();
+    let sidecar = sidecar_path(&directory, "photo.JPG", SidecarNaming::AppendXmpExtension);
     fs::write(
         &sidecar,
         br#"<z:xmpmeta xmlns:z="adobe:ns:meta/">
@@ -300,8 +346,8 @@ fn refuses_dtd_foreign_unknown_and_newer_packets_without_changing_bytes() {
         ),
         (
             "newer",
-            br#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:crema="urn:crema:xmp:edit" crema:owner="Crema" crema:schemaVersion="2" crema:exposureCentistops="35"/></rdf:RDF></x:xmpmeta>"#,
-            Some(2),
+            br#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:crema="urn:crema:xmp:edit" crema:owner="Crema" crema:schemaVersion="3" crema:sourceFileName="newer.JPG" crema:exposureCentistops="35"/></rdf:RDF></x:xmpmeta>"#,
+            Some(3),
         ),
     ];
     let store = SidecarStore;
@@ -424,6 +470,215 @@ fn derives_raw_and_rendered_sidecar_names() {
 }
 
 #[test]
+fn same_stem_raws_are_ambiguous_before_open() {
+    let directory = TestDirectory::new("ambiguous-raws");
+    let raf = directory.path().join("photo.RAF");
+    let orf = directory.path().join("photo.ORF");
+    fs::write(&raf, b"raf").unwrap();
+    fs::write(&orf, b"orf").unwrap();
+
+    let mut session = EditSession::open(
+        SidecarStore
+            .open(SidecarLocator::new(
+                &raf,
+                SidecarNaming::ReplaceOriginalExtension,
+                classify_sidecar,
+            ))
+            .unwrap(),
+    );
+    assert!(matches!(
+        session.save_state(),
+        SaveState::ReadOnly(SidecarBlockReason::AmbiguousOriginals { .. })
+    ));
+    session.apply(EditCommand::SetExposure(
+        ExposureCentistops::new(100).unwrap(),
+    ));
+    assert!(session.is_dirty());
+    assert!(session.begin_save().is_err());
+    assert!(!directory.path().join("photo.xmp").exists());
+    assert_eq!(fs::read(raf).unwrap(), b"raf");
+    assert_eq!(fs::read(orf).unwrap(), b"orf");
+}
+
+#[test]
+fn case_varied_raw_stems_are_treated_as_one_sidecar_slot() {
+    let directory = TestDirectory::new("case-varied-raws");
+    let raf = directory.path().join("photo.RAF");
+    let orf = directory.path().join("PHOTO.ORF");
+    fs::write(&raf, b"raf").unwrap();
+    fs::write(&orf, b"orf").unwrap();
+
+    let session = EditSession::open(
+        SidecarStore
+            .open(SidecarLocator::new(
+                &raf,
+                SidecarNaming::ReplaceOriginalExtension,
+                classify_sidecar,
+            ))
+            .unwrap(),
+    );
+
+    assert!(matches!(
+        session.save_state(),
+        SaveState::ReadOnly(SidecarBlockReason::AmbiguousOriginals { .. })
+    ));
+}
+
+#[test]
+fn competing_raw_before_publish_blocks_save_and_keeps_draft() {
+    let directory = TestDirectory::new("late-raw");
+    let raf = directory.path().join("photo.RAF");
+    fs::write(&raf, b"raf").unwrap();
+    let store = SidecarStore;
+    let mut session = EditSession::open(
+        store
+            .open(SidecarLocator::new(
+                &raf,
+                SidecarNaming::ReplaceOriginalExtension,
+                classify_sidecar,
+            ))
+            .unwrap(),
+    );
+    session.apply(EditCommand::SetExposure(
+        ExposureCentistops::new(100).unwrap(),
+    ));
+    let command = session.begin_save().unwrap().unwrap();
+    fs::write(directory.path().join("photo.ORF"), b"orf").unwrap();
+
+    session.accept_save(store.commit(command));
+
+    assert!(matches!(
+        session.save_state(),
+        SaveState::ReadOnly(SidecarBlockReason::AmbiguousOriginals { .. })
+    ));
+    assert_eq!(session.recipe().exposure().value(), 100);
+    assert_eq!(session.durable_recipe().exposure().value(), 0);
+    assert!(!directory.path().join("photo.xmp").exists());
+}
+
+#[test]
+fn raw_and_jpeg_companions_save_distinct_associated_recipes() {
+    let directory = TestDirectory::new("raw-jpeg");
+    let raf = directory.path().join("photo.RAF");
+    let jpeg = directory.path().join("photo.JPG");
+    fs::write(&raf, b"raf").unwrap();
+    fs::write(&jpeg, b"jpeg").unwrap();
+    let store = SidecarStore;
+
+    for (path, naming, exposure) in [
+        (&raf, SidecarNaming::ReplaceOriginalExtension, 100),
+        (&jpeg, SidecarNaming::AppendXmpExtension, -200),
+    ] {
+        let mut session = EditSession::open(
+            store
+                .open(SidecarLocator::new(path, naming, classify_sidecar))
+                .unwrap(),
+        );
+        session.apply(EditCommand::SetExposure(
+            ExposureCentistops::new(exposure).unwrap(),
+        ));
+        let command = session.begin_save().unwrap().unwrap();
+        session.accept_save(store.commit(command));
+        assert_eq!(session.save_state(), SaveState::Saved);
+    }
+
+    let raw = EditSession::open(
+        store
+            .open(SidecarLocator::new(
+                &raf,
+                SidecarNaming::ReplaceOriginalExtension,
+                classify_sidecar,
+            ))
+            .unwrap(),
+    );
+    let rendered = EditSession::open(
+        store
+            .open(SidecarLocator::new(
+                &jpeg,
+                SidecarNaming::AppendXmpExtension,
+                classify_sidecar,
+            ))
+            .unwrap(),
+    );
+    assert_eq!(raw.recipe().exposure().value(), 100);
+    assert_eq!(rendered.recipe().exposure().value(), -200);
+    assert!(directory.path().join("photo.xmp").exists());
+    assert!(directory.path().join("photo.JPG.xmp").exists());
+}
+
+#[test]
+fn conflicting_supported_raw_sidecar_variants_are_ambiguous() {
+    let directory = TestDirectory::new("raw-sidecar-variants");
+    let raf = directory.path().join("photo.RAF");
+    fs::write(&raf, b"raf").unwrap();
+    fs::write(directory.path().join("photo.xmp"), LEGACY_XMP).unwrap();
+    fs::write(directory.path().join("photo.RAF.xmp"), LEGACY_XMP).unwrap();
+
+    let session = EditSession::open(
+        SidecarStore
+            .open(SidecarLocator::new(
+                &raf,
+                SidecarNaming::ReplaceOriginalExtension,
+                classify_sidecar,
+            ))
+            .unwrap(),
+    );
+    assert!(matches!(
+        session.save_state(),
+        SaveState::ReadOnly(SidecarBlockReason::AmbiguousSidecars { .. })
+    ));
+}
+
+#[test]
+fn explicit_raw_association_survives_a_later_competing_original() {
+    let directory = TestDirectory::new("explicit-raw");
+    let raf = directory.path().join("photo.RAF");
+    let orf = directory.path().join("photo.ORF");
+    fs::write(&raf, b"raf").unwrap();
+    let store = SidecarStore;
+    let mut session = EditSession::open(
+        store
+            .open(SidecarLocator::new(
+                &raf,
+                SidecarNaming::ReplaceOriginalExtension,
+                classify_sidecar,
+            ))
+            .unwrap(),
+    );
+    session.apply(EditCommand::SetExposure(
+        ExposureCentistops::new(100).unwrap(),
+    ));
+    let command = session.begin_save().unwrap().unwrap();
+    session.accept_save(store.commit(command));
+    fs::write(&orf, b"orf").unwrap();
+
+    let raf_session = EditSession::open(
+        store
+            .open(SidecarLocator::new(
+                &raf,
+                SidecarNaming::ReplaceOriginalExtension,
+                classify_sidecar,
+            ))
+            .unwrap(),
+    );
+    let orf_session = EditSession::open(
+        store
+            .open(SidecarLocator::new(
+                &orf,
+                SidecarNaming::ReplaceOriginalExtension,
+                classify_sidecar,
+            ))
+            .unwrap(),
+    );
+    assert_eq!(raf_session.recipe().exposure().value(), 100);
+    assert_eq!(raf_session.save_state(), SaveState::Saved);
+    assert!(matches!(
+        orf_session.save_state(),
+        SaveState::ReadOnly(SidecarBlockReason::AssociatedWithOtherOriginal { .. })
+    ));
+}
+
+#[test]
 fn detects_external_creation_removal_and_change() {
     let directory = TestDirectory::new("sidecar-conflict");
     let store = SidecarStore;
@@ -445,14 +700,14 @@ fn detects_external_creation_removal_and_change() {
     assert_eq!(fs::read(&created_path).unwrap(), foreign);
 
     let changed_location = location(&directory, "changed.JPG", SidecarNaming::AppendXmpExtension);
-    fs::write(changed_location.sidecar(), GOLDEN_XMP).unwrap();
+    fs::write(changed_location.sidecar(), LEGACY_XMP).unwrap();
     let changed_path = changed_location.sidecar().to_owned();
     let mut changed = EditSession::open(store.open(changed_location).unwrap());
     changed.apply(EditCommand::SetExposure(
         ExposureCentistops::new(40).unwrap(),
     ));
     let command = changed.begin_save().unwrap().unwrap();
-    let replacement = GOLDEN_XMP
+    let replacement = LEGACY_XMP
         .iter()
         .copied()
         .chain(b" ".iter().copied())
@@ -466,7 +721,7 @@ fn detects_external_creation_removal_and_change() {
     assert_eq!(fs::read(&changed_path).unwrap(), replacement);
 
     let removed_location = location(&directory, "removed.JPG", SidecarNaming::AppendXmpExtension);
-    fs::write(removed_location.sidecar(), GOLDEN_XMP).unwrap();
+    fs::write(removed_location.sidecar(), LEGACY_XMP).unwrap();
     let removed_path = removed_location.sidecar().to_owned();
     let mut removed = EditSession::open(store.open(removed_location).unwrap());
     removed.apply(EditCommand::SetExposure(

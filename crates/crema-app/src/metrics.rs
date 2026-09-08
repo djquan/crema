@@ -12,6 +12,7 @@ use std::{
 #[derive(Clone)]
 pub struct Metrics(Option<Arc<Log>>);
 struct Log {
+    session_id: String,
     start: Instant,
     records: Mutex<Vec<Record>>,
     dropped: AtomicU64,
@@ -27,8 +28,13 @@ pub struct Record {
 }
 impl Metrics {
     pub fn new(enabled: bool) -> Self {
+        Self::with_session(enabled, format!("local-{}", std::process::id()))
+    }
+
+    pub fn with_session(enabled: bool, session_id: String) -> Self {
         Self(enabled.then(|| {
             Arc::new(Log {
+                session_id,
                 start: Instant::now(),
                 records: Mutex::new(Vec::new()),
                 dropped: AtomicU64::new(0),
@@ -74,7 +80,7 @@ impl Metrics {
         );
         writeln!(
             output,
-            "micros\tevent\tasset\tpurpose\tgeneration\tinterest\tattempt\tvalue"
+            "session_id\tmicros\tevent\tasset\tpurpose\tgeneration\tinterest\tattempt\tvalue"
         )?;
         for record in self.records() {
             let (asset, purpose, generation) = record
@@ -89,7 +95,8 @@ impl Metrics {
                 .unwrap_or((String::new(), String::new(), 0));
             writeln!(
                 output,
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                self.0.as_ref().expect("enabled metrics log").session_id,
                 record.micros,
                 record.event,
                 asset,
@@ -103,7 +110,8 @@ impl Metrics {
         if let Some(log) = &self.0 {
             writeln!(
                 output,
-                "{}\tmetrics_dropped\t\t\t0\t0\t0\t{}",
+                "{}\t{}\tmetrics_dropped\t\t\t0\t0\t0\t{}",
+                log.session_id,
                 log.start.elapsed().as_micros(),
                 log.dropped.load(Ordering::Relaxed)
             )?;

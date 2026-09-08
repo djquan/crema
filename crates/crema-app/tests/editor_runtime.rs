@@ -3,7 +3,7 @@ use crema_app::editor::{
     RenderRequest, SaveRequest, SourceIdentity, save_state_label,
 };
 use crema_core::edit::{EditCommand, EditSession, ExposureCentistops, SaveState};
-use crema_core::sidecar::{SidecarLocation, SidecarStore};
+use crema_core::sidecar::SidecarStore;
 use crema_core::{AssetCandidate, ScanEvent, scan_folder};
 use crema_image::{CandidateFormat, PreviewPixels, PreviewSize, RasterFormat, classify_candidate};
 use std::fs;
@@ -60,8 +60,7 @@ fn candidate(directory: &Directory, name: &str) -> AssetCandidate<CandidateForma
 }
 
 fn edited_session(path: &Path, format: CandidateFormat) -> EditSession {
-    let location = SidecarLocation::for_original(path, format.sidecar_naming()).unwrap();
-    let mut session = EditSession::open(SidecarStore.open(location).unwrap());
+    let mut session = EditSession::open(SidecarStore.open(format.sidecar_locator(path)).unwrap());
     session.apply(EditCommand::SetExposure(
         ExposureCentistops::new(100).unwrap(),
     ));
@@ -122,9 +121,11 @@ fn before_is_view_only_and_blocked_edits_stay_visibly_unsaved() {
     let candidate = candidate(&directory, "photo.jpg");
     let sidecar = candidate.path().with_file_name("photo.jpg.xmp");
     fs::write(&sidecar, b"foreign XMP").unwrap();
-    let location =
-        SidecarLocation::for_original(candidate.path(), candidate.kind().sidecar_naming()).unwrap();
-    let mut session = EditSession::open(SidecarStore.open(location).unwrap());
+    let mut session = EditSession::open(
+        SidecarStore
+            .open(candidate.kind().sidecar_locator(candidate.path()))
+            .unwrap(),
+    );
     session.apply(EditCommand::SetExposure(
         ExposureCentistops::new(75).unwrap(),
     ));
@@ -141,7 +142,6 @@ fn before_is_view_only_and_blocked_edits_stay_visibly_unsaved() {
 }
 
 #[test]
-#[cfg(unix)]
 fn save_and_latest_render_complete_on_independent_lanes() {
     let directory = Directory::new("independent-lanes");
     let candidate = candidate(&directory, "photo.jpg");
@@ -202,7 +202,6 @@ fn save_and_latest_render_complete_on_independent_lanes() {
 }
 
 #[test]
-#[cfg(unix)]
 fn export_is_profiled_bounded_atomic_and_never_overwrites() {
     let directory = Directory::new("export");
     let candidate = candidate(&directory, "photo.original.JPG");
@@ -266,7 +265,6 @@ fn export_is_profiled_bounded_atomic_and_never_overwrites() {
 }
 
 #[test]
-#[cfg(unix)]
 fn source_replacement_blocks_save_and_export_and_aliases_never_overwrite() {
     let directory = Directory::new("source-identity");
     let candidate = candidate(&directory, "photo.jpg");
@@ -335,7 +333,6 @@ fn source_replacement_blocks_save_and_export_and_aliases_never_overwrite() {
 }
 
 #[test]
-#[cfg(unix)]
 fn submit_after_shutdown_finishes_the_save_as_failed() {
     let directory = Directory::new("closed-save-runtime");
     let candidate = candidate(&directory, "photo.jpg");

@@ -5,7 +5,7 @@ use crate::editor::{
 use crate::jobs::{Event, JobKey, PreviewDemand, PreviewRequest, PreviewRuntime, Purpose};
 use crate::{metrics::Metrics, thumbnail_cache::CacheConfig};
 use crema_core::edit::{EditCommand, EditSession, ExposureCentistops, SaveState};
-use crema_core::sidecar::{SidecarLocation, SidecarStore};
+use crema_core::sidecar::SidecarStore;
 use crema_core::{AssetCandidate, AssetId};
 use crema_image::{
     CandidateFormat, DecodeOutcome, DecodeResult, FailureClass, PreviewPixels, PreviewSize,
@@ -158,15 +158,15 @@ struct ViewerPixels {
 
 enum EditorDocument {
     Ready {
-        session: EditSession,
+        session: Box<EditSession>,
         source: Option<SourceIdentity>,
         source_error: Option<String>,
     },
     ReadOnly(String),
 }
 
-struct EditedPreview {
-    demand: RenderDemand,
+struct AcceptedDisplay {
+    key: RenderKey,
     texture: TextureHandle,
 }
 
@@ -269,13 +269,9 @@ fn concise_reason(reason: &str) -> String {
 }
 
 fn open_document(path: &std::path::Path, format: CandidateFormat) -> EditorDocument {
-    let location = match SidecarLocation::for_original(path, format.sidecar_naming()) {
-        Ok(location) => location,
-        Err(error) => return EditorDocument::ReadOnly(error.to_string()),
-    };
-    match SidecarStore.open(location) {
+    match SidecarStore.open(format.sidecar_locator(path)) {
         Ok(opened) => EditorDocument::Ready {
-            session: EditSession::open(opened),
+            session: Box::new(EditSession::open(opened)),
             source: None,
             source_error: None,
         },
@@ -321,6 +317,27 @@ fn accepts_render(demands: &HashMap<AssetId, RenderDemand>, key: RenderKey) -> b
         .is_some_and(|demand| demand.accepts(key))
 }
 
+fn metric_exposure(value: i16) -> u64 {
+    u64::try_from(i64::from(value) + 500).expect("bounded exposure metric")
+}
+
+fn metric_path_id(path: &std::path::Path) -> u64 {
+    path.to_string_lossy()
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3)
+        })
+}
+
+fn can_display_edit(
+    display: &AcceptedDisplay,
+    asset: AssetId,
+    input_epoch: u64,
+    use_original: bool,
+) -> bool {
+    !use_original && display.key.asset() == asset && display.key.input_epoch() == input_epoch
+}
+
 fn needs_activation_render(
     previous: Option<AssetId>,
     next: AssetId,
@@ -350,7 +367,7 @@ pub struct Browser {
     documents: HashMap<AssetId, EditorDocument>,
     input_epochs: HashMap<AssetId, u64>,
     render_demands: HashMap<AssetId, RenderDemand>,
-    edited_previews: HashMap<AssetId, EditedPreview>,
+    edited_previews: HashMap<AssetId, AcceptedDisplay>,
     comparison: Comparison,
     exports: HashMap<AssetId, ExportState>,
     active_viewer: Option<AssetId>,
@@ -464,8 +481,20 @@ impl Browser {
             return;
         };
         let candidate = &self.workspace.assets[index];
+        let path_id = metric_path_id(candidate.path());
         self.documents
             .insert(asset, open_document(candidate.path(), *candidate.kind()));
+        if let Some(EditorDocument::Ready { session, .. }) = self.documents.get(&asset)
+            && session.recipe().exposure().value() != 0
+        {
+            self.metrics.record(
+                "recipe_restored",
+                Some(self.key(asset, Purpose::Viewer)),
+                path_id,
+                0,
+                metric_exposure(session.recipe().exposure().value()),
+            );
+        }
         self.exports.entry(asset).or_default();
     }
 
@@ -484,10 +513,10 @@ impl Browser {
             Some(EditorDocument::Ready { session, .. })
                 if session.recipe().exposure().value() != 0
         );
-        let has_accepted_texture = self.edited_previews.get(&asset).is_some_and(|preview| {
-            self.render_demands
+        let has_accepted_texture = self.edited_previews.get(&asset).is_some_and(|display| {
+            self.input_epochs
                 .get(&asset)
-                .is_some_and(|demand| *demand == preview.demand)
+                .is_some_and(|epoch| can_display_edit(display, asset, *epoch, false))
         });
         if needs_activation_render(previous, asset, nonzero_recipe, has_accepted_texture) {
             self.schedule_render(asset, RenderQuality::Settled);
@@ -610,26 +639,33 @@ impl Browser {
                         image,
                         TextureOptions::LINEAR,
                     );
-                    self.edited_previews.insert(
-                        key.asset(),
-                        EditedPreview {
-                            demand: RenderDemand::new(key),
-                            texture,
-                        },
-                    );
+                    self.edited_previews
+                        .insert(key.asset(), AcceptedDisplay { key, texture });
                 }
                 EditorEvent::Saved(result) => {
                     let asset = result.asset();
+                    let metric_key = self.key(asset, Purpose::Viewer);
+                    let path_id =
+                        metric_path_id(self.workspace.assets[self.workspace.index[&asset]].path());
                     let mut succeeded = false;
                     if let Some(EditorDocument::Ready { session, .. }) =
                         self.documents.get_mut(&asset)
                     {
                         session.accept_save(result.into_completion());
                         succeeded = !matches!(session.save_state(), SaveState::Failed(_));
+                        if succeeded {
+                            self.metrics.record(
+                                "recipe_saved",
+                                Some(metric_key),
+                                path_id,
+                                0,
+                                metric_exposure(session.durable_recipe().exposure().value()),
+                            );
+                        }
                     }
                     self.metrics.record(
                         "save_finished",
-                        Some(self.key(asset, Purpose::Viewer)),
+                        Some(metric_key),
                         0,
                         0,
                         u64::from(succeeded),
@@ -1261,15 +1297,15 @@ impl Browser {
                 EditorDocument::ReadOnly(_) => None,
             })
             .unwrap_or(true);
-        let edited_texture = (!use_original)
-            .then(|| self.edited_previews.get(&id))
-            .flatten()
-            .filter(|preview| {
-                self.render_demands
+        let edited_texture = self
+            .edited_previews
+            .get(&id)
+            .filter(|display| {
+                self.input_epochs
                     .get(&id)
-                    .is_some_and(|demand| *demand == preview.demand)
+                    .is_some_and(|epoch| can_display_edit(display, id, *epoch, use_original))
             })
-            .map(|preview| preview.texture.clone());
+            .map(|display| display.texture.clone());
         match self.cache.get_mut(&display_key) {
             Some(Cached::Image {
                 texture,
@@ -1636,6 +1672,7 @@ mod tests {
 
     #[test]
     fn browser_retains_cpu_pixels_only_for_viewers_and_checks_exact_render_demand() {
+        let context = egui::Context::default();
         let asset = test_asset();
         let pixels = || {
             PreviewPixels::new(
@@ -1667,6 +1704,31 @@ mod tests {
                 RenderQuality::Settled,
             )
         ));
+        let accepted = AcceptedDisplay {
+            key: current,
+            texture: context.load_texture(
+                "accepted-edit",
+                egui::ColorImage::new([1, 1], vec![Color32::WHITE]),
+                TextureOptions::LINEAR,
+            ),
+        };
+        let pending = RenderKey::new(
+            asset,
+            crema_core::edit::EditRevision::ZERO,
+            2,
+            RenderQuality::Interactive,
+        );
+        assert!(accepts_render(
+            &HashMap::from([(asset, RenderDemand::new(pending))]),
+            pending
+        ));
+        assert!(
+            can_display_edit(&accepted, asset, 2, false),
+            "a newer pending revision must not replace an accepted edit with the original"
+        );
+        assert!(!can_display_edit(&accepted, asset, 2, true));
+        assert!(!can_display_edit(&accepted, asset, 3, false));
+        assert!(!can_display_edit(&accepted, test_asset(), 2, false));
         let other = test_asset();
         assert!(needs_activation_render(Some(other), asset, true, false));
         assert!(!needs_activation_render(Some(asset), asset, true, false));
@@ -1676,6 +1738,143 @@ mod tests {
         assert!(cancel_close(true, true, CloseConfirmation::Prompting));
         assert!(!cancel_close(true, true, CloseConfirmation::Discarding));
         assert!(!cancel_close(true, false, CloseConfirmation::Inactive));
+    }
+
+    #[test]
+    fn pending_edit_tessellates_the_last_accepted_texture() {
+        let root = std::env::temp_dir().join(format!(
+            "crema-pending-display-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("photo.jpg"), []).unwrap();
+        let ScanEvent::Candidate(candidate) = scan_folder(&root, classify_candidate)
+            .unwrap()
+            .next()
+            .unwrap()
+        else {
+            panic!("real candidate");
+        };
+        let asset = candidate.id();
+        let context = egui::Context::default();
+        let original = context.load_texture(
+            "original-preview",
+            egui::ColorImage::new([1, 1], vec![Color32::BLACK]),
+            TextureOptions::LINEAR,
+        );
+        let original_id = original.id();
+        let accepted_texture = context.load_texture(
+            "accepted-preview",
+            egui::ColorImage::new([1, 1], vec![Color32::WHITE]),
+            TextureOptions::LINEAR,
+        );
+        let accepted_id = accepted_texture.id();
+        let mut document = open_document(candidate.path(), *candidate.kind());
+        let EditorDocument::Ready { session, .. } = &mut document else {
+            panic!("editable test document");
+        };
+        session.apply(EditCommand::SetExposure(
+            crema_core::edit::ExposureCentistops::new(100).unwrap(),
+        ));
+        let accepted_key = RenderKey::new(asset, session.revision(), 7, RenderQuality::Settled);
+        session.apply(EditCommand::SetExposure(
+            crema_core::edit::ExposureCentistops::new(200).unwrap(),
+        ));
+        let wake = context.clone();
+        let mut browser = Browser {
+            root: root.clone(),
+            workspace: Workspace {
+                assets: vec![candidate],
+                index: HashMap::from([(asset, 0)]),
+                selected: Some(asset),
+                view: View::Viewer,
+                scanning: false,
+                failures: Vec::new(),
+                generation: 1,
+            },
+            jobs: PreviewRuntime::new(std::env::current_exe().unwrap(), move || {
+                wake.request_repaint()
+            }),
+            cache: HashMap::new(),
+            tick: 1,
+            actual_pixels: false,
+            thumbnail_width: 220.0,
+            metrics: Metrics::default(),
+            metric_path: None,
+            measured_selection: None,
+            drawn: HashSet::new(),
+            editor: EditorRuntime::new(std::env::current_exe().unwrap(), || {}),
+            documents: HashMap::from([(asset, document)]),
+            input_epochs: HashMap::from([(asset, 7)]),
+            render_demands: HashMap::new(),
+            edited_previews: HashMap::from([(
+                asset,
+                AcceptedDisplay {
+                    key: accepted_key,
+                    texture: accepted_texture,
+                },
+            )]),
+            comparison: Comparison::After,
+            exports: HashMap::new(),
+            active_viewer: Some(asset),
+            close_confirmation: CloseConfirmation::Inactive,
+            reveal_selected: false,
+        };
+        let viewer = browser.key(asset, Purpose::Viewer);
+        browser.cache.insert(
+            viewer,
+            Cached::Image {
+                texture: original,
+                viewer_pixels: Some(prepare_viewer_pixels(
+                    PreviewPixels::new(1, 1, vec![0, 0, 0, 255], PreviewSize::new(1).unwrap())
+                        .unwrap(),
+                )),
+                metadata: SourceMetadata {
+                    dimensions: [1, 1],
+                    decoded_dimensions: [1, 1],
+                    source_bits: crema_image::Fact::Known(8),
+                    decoded_bits: 8,
+                    orientation: crema_image::Orientation::Exif(1),
+                    icc: crema_image::Fact::Known(crema_image::Icc::Absent),
+                    nclx: None,
+                    camera_make: String::new(),
+                    camera_model: String::new(),
+                    limitations: String::new(),
+                },
+                provenance: Provenance::JpegDecode,
+                used: 0,
+            },
+        );
+        browser.schedule_render(asset, RenderQuality::Interactive);
+        assert!(!accepts_render(&browser.render_demands, accepted_key));
+
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(100.0, 100.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let _ = browser.viewer(ui);
+            },
+        );
+        let shapes = std::mem::take(&mut output.shapes);
+        output.textures_delta.clear();
+        let texture_ids = context
+            .tessellate(shapes, output.pixels_per_point)
+            .into_iter()
+            .filter_map(|primitive| match primitive.primitive {
+                egui::epaint::Primitive::Mesh(mesh) => Some(mesh.texture_id),
+                egui::epaint::Primitive::Callback(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(texture_ids.contains(&accepted_id));
+        assert!(!texture_ids.contains(&original_id));
+        drop(browser);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1816,8 +2015,8 @@ mod tests {
         browser.render_demands.insert(asset, demand);
         browser.edited_previews.insert(
             asset,
-            EditedPreview {
-                demand,
+            AcceptedDisplay {
+                key: render_key,
                 texture: context.load_texture(
                     "edited-viewer",
                     egui::ColorImage::new([1, 1], vec![Color32::WHITE]),

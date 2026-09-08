@@ -1,4 +1,29 @@
-use std::{io, path::PathBuf, process::ExitCode};
+use std::{
+    io,
+    path::PathBuf,
+    process::ExitCode,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+fn metrics_destination() -> Option<(String, PathBuf)> {
+    let session_id = format!(
+        "{}-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_nanos(),
+        std::process::id()
+    );
+    if let Some(path) = std::env::var_os("CREMA_METRICS").map(PathBuf::from) {
+        return Some((session_id, path));
+    }
+    std::env::var_os("CREMA_METRICS_DIR")
+        .map(PathBuf::from)
+        .map(|directory| {
+            let path = directory.join(format!("gui-metrics-{session_id}.tsv"));
+            (session_id, path)
+        })
+}
 
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
@@ -34,8 +59,12 @@ fn main() -> ExitCode {
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
-    let metric_path = std::env::var_os("CREMA_METRICS").map(PathBuf::from);
-    let metrics = crema_app::metrics::Metrics::new(metric_path.is_some());
+    let metric_destination = metrics_destination();
+    let metrics = metric_destination
+        .as_ref()
+        .map(|(session_id, _)| crema_app::metrics::Metrics::with_session(true, session_id.clone()))
+        .unwrap_or_default();
+    let metric_path = metric_destination.map(|(_, path)| path);
     metrics.record("gui_launch", None, 0, 0, 1);
     let mut cache = crema_app::thumbnail_cache::CacheConfig::default();
     if let Some(root) = std::env::var_os("CREMA_CACHE_ROOT") {

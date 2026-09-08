@@ -66,6 +66,14 @@ impl CandidateFormat {
             Self::Raw(_) => SidecarNaming::ReplaceOriginalExtension,
         }
     }
+
+    pub fn sidecar_locator(self, path: &Path) -> crema_core::sidecar::SidecarLocator {
+        crema_core::sidecar::SidecarLocator::new(path, self.sidecar_naming(), sidecar_naming)
+    }
+}
+
+fn sidecar_naming(path: &Path) -> Option<crema_core::sidecar::SidecarNaming> {
+    classify_candidate(path).map(CandidateFormat::sidecar_naming)
 }
 
 impl fmt::Display for CandidateFormat {

@@ -693,21 +693,27 @@ mod tests {
         fs::create_dir(&source_root).unwrap();
         let original = source_root.join("0123456789abcdef.thumb");
         fs::write(&original, b"original user bytes").unwrap();
-        let mut unsafe_roots = vec![
-            source_root.clone(),
-            source_root.join("new/cache"),
-            root.join("missing/../originals/cache"),
-        ];
+        let unsafe_roots = {
+            let roots = vec![
+                source_root.clone(),
+                source_root.join("new/cache"),
+                root.join("missing/../originals/cache"),
+            ];
+            #[cfg(unix)]
+            {
+                let alias = root.join("alias");
+                std::os::unix::fs::symlink(&source_root, &alias).unwrap();
+                let mut roots = roots;
+                roots.extend([alias.clone(), alias.join("nested")]);
+                roots
+            }
+            #[cfg(not(unix))]
+            roots
+        };
         assert!(
             resolved_cache_root(&root.join("originals/../outside-cache")).is_none(),
             "parent-directory components must be rejected even before suffix creation"
         );
-        #[cfg(unix)]
-        {
-            let alias = root.join("alias");
-            std::os::unix::fs::symlink(&source_root, &alias).unwrap();
-            unsafe_roots.extend([alias.clone(), alias.join("nested")]);
-        }
         for candidate in unsafe_roots {
             let config = CacheConfig {
                 root: Some(candidate),

@@ -39,10 +39,11 @@ Add `--fail-on-decode-error` to return status 2 when any decode fails. `--output
 creates a new report file and refuses to overwrite an existing file.
 
 Color rendering is experimental. Embedded JPEG ICC profiles are converted to
-sRGB. HEIC decoding accepts only verified 8-bit SDR transfer paths without an
-embedded ICC profile; high-bit, HDR, unknown-transfer, and hidden-profile inputs
-fail as unsupported instead of being displayed with guessed color. Display
-profiles are not managed.
+sRGB. HEIC decoding accepts only one allowlisted complete 8-bit SDR NCLX
+description without an embedded ICC profile; high-bit, HDR, unknown-color, and
+hidden-profile inputs fail as unsupported instead of being displayed with guessed
+color. Independent numerical color validation remains open. Display profiles are
+not managed.
 RAW previews use Rawler's baseline development. Successful pixels do not establish
 camera-mode coverage or rendering quality. Exposure works on the decoder's
 display-ready 8-bit output under an sRGB assumption. Preview and export use the
@@ -50,9 +51,11 @@ same exposure renderer. JPEG exports include an sRGB profile and have a maximum
 long edge of 4096 pixels. This is not a scene-linear or full-resolution workflow.
 
 Crash-safe sidecar and export publication has real-filesystem coverage on macOS.
-Windows source identity and durable folder publication still need implementation
-and validation. The app waits for editing workers during normal exit. Closing a
-window with unsaved changes asks whether to keep editing or discard the changes.
+Windows opened-file identity and publication are implemented, with the same
+behavior tests enabled for native CI; native Windows validation remains an open
+Phase 0 evidence row. The app waits for editing workers during normal exit.
+Closing a window with unsaved changes asks whether to keep editing or discard the
+changes.
 
 See the [Phase 0 status](docs/phase0-status.md) for the current evidence and
 blockers, the [decode prototype reference](docs/decode-prototype.md) for bounds

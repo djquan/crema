@@ -206,11 +206,16 @@ pub(crate) fn heif(
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SupportedHeifColor {
+    Bt709SrgbBt601Limited,
+}
+
 fn validate_heif_color(
     bit_depth: u8,
     icc_present: bool,
     nclx: Option<[u16; 4]>,
-) -> Result<(), DecodeError> {
+) -> Result<SupportedHeifColor, DecodeError> {
     if bit_depth != 8 {
         return Err(DecodeError::unsupported_color(format!(
             "HEIC {bit_depth}-bit color requires a precision-preserving conversion"
@@ -221,15 +226,15 @@ fn validate_heif_color(
             "HEIC ICC is present but the decoder does not expose it for conversion",
         ));
     }
-    let [_, transfer, _, _] = nclx.ok_or_else(|| {
-        DecodeError::unsupported_color("HEIC transfer is not declared by the decoder")
+    let nclx = nclx.ok_or_else(|| {
+        DecodeError::unsupported_color("HEIC color description is not declared by the decoder")
     })?;
-    if !matches!(transfer, 1 | 13) {
-        return Err(DecodeError::unsupported_color(format!(
-            "HEIC transfer {transfer} has no verified SDR conversion"
-        )));
+    match nclx {
+        [1, 13, 6, 0] => Ok(SupportedHeifColor::Bt709SrgbBt601Limited),
+        [primaries, transfer, matrix, full_range] => Err(DecodeError::unsupported_color(format!(
+            "HEIC NCLX {primaries},{transfer},{matrix},{full_range} has no verified SDR conversion"
+        ))),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -357,12 +362,20 @@ mod tests {
     }
 
     #[test]
-    fn heif_color_gate_refuses_precision_and_transfers_we_do_not_render() {
-        assert!(validate_heif_color(8, false, Some([1, 1, 1, 1])).is_ok());
+    fn heif_color_gate_accepts_only_the_complete_verified_description() {
+        assert_eq!(
+            validate_heif_color(8, false, Some([1, 13, 6, 0])).unwrap(),
+            SupportedHeifColor::Bt709SrgbBt601Limited
+        );
         for unsupported in [
-            validate_heif_color(10, false, Some([1, 1, 1, 1])),
-            validate_heif_color(8, true, Some([1, 1, 1, 1])),
+            validate_heif_color(10, false, Some([1, 13, 6, 0])),
+            validate_heif_color(8, true, Some([1, 13, 6, 0])),
             validate_heif_color(8, false, None),
+            validate_heif_color(8, false, Some([11, 13, 6, 0])),
+            validate_heif_color(8, false, Some([1, 13, 8, 0])),
+            validate_heif_color(8, false, Some([65_535, 13, 65_535, 0])),
+            validate_heif_color(8, false, Some([1, 13, 6, 1])),
+            validate_heif_color(8, false, Some([1, 1, 6, 0])),
             validate_heif_color(8, false, Some([9, 16, 9, 0])),
             validate_heif_color(8, false, Some([9, 18, 9, 0])),
             validate_heif_color(8, false, Some([1, 2, 1, 0])),

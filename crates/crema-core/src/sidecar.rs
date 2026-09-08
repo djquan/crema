@@ -1,4 +1,5 @@
 use crate::edit::{EditRecipe, ExposureCentistops, SaveCommand, SaveCompletion, SaveReceipt};
+use quick_xml::escape::escape;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 use std::collections::HashMap;
@@ -15,12 +16,38 @@ const MAX_XMP_BYTES: usize = 64 * 1024;
 const XMP_NS: &str = "adobe:ns:meta/";
 const RDF_NS: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 const CREMA_NS: &str = "urn:crema:xmp:edit";
+const CURRENT_SCHEMA: u32 = 2;
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SidecarNaming {
     ReplaceOriginalExtension,
     AppendXmpExtension,
+}
+
+pub type SidecarClassifier = fn(&Path) -> Option<SidecarNaming>;
+
+#[derive(Clone, Debug)]
+pub struct SidecarLocator {
+    original: PathBuf,
+    naming: SidecarNaming,
+    classify: SidecarClassifier,
+}
+
+impl SidecarLocator {
+    pub fn new(original: &Path, naming: SidecarNaming, classify: SidecarClassifier) -> Self {
+        Self {
+            original: original.to_owned(),
+            naming,
+            classify,
+        }
+    }
+
+    pub fn sidecar(&self) -> PathBuf {
+        SidecarLocation::for_original(&self.original, self.naming)
+            .expect("sidecar locator requires a valid original path")
+            .sidecar
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -92,23 +119,53 @@ pub enum ConflictKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SidecarBlockReason {
-    UnrecognizedExisting { path: PathBuf },
-    NewerSchema { path: PathBuf, found: u32 },
-    TooLarge { path: PathBuf, max_bytes: usize },
-    UnsafeTarget { path: PathBuf },
-    WriteDenied { path: PathBuf, message: String },
-    DurablePublicationUnavailable { path: PathBuf },
+    AmbiguousOriginals {
+        path: PathBuf,
+        originals: Vec<PathBuf>,
+    },
+    AmbiguousSidecars {
+        original: PathBuf,
+        candidates: Vec<PathBuf>,
+    },
+    AssociatedWithOtherOriginal {
+        path: PathBuf,
+        source_file_name: String,
+    },
+    UnsupportedOriginalName {
+        path: PathBuf,
+    },
+    UnrecognizedExisting {
+        path: PathBuf,
+    },
+    NewerSchema {
+        path: PathBuf,
+        found: u32,
+    },
+    TooLarge {
+        path: PathBuf,
+        max_bytes: usize,
+    },
+    UnsafeTarget {
+        path: PathBuf,
+    },
+    WriteDenied {
+        path: PathBuf,
+        message: String,
+    },
 }
 
 impl SidecarBlockReason {
     pub fn path(&self) -> &Path {
         match self {
-            Self::UnrecognizedExisting { path }
+            Self::AmbiguousOriginals { path, .. }
+            | Self::AssociatedWithOtherOriginal { path, .. }
+            | Self::UnsupportedOriginalName { path }
+            | Self::UnrecognizedExisting { path }
             | Self::NewerSchema { path, .. }
             | Self::TooLarge { path, .. }
             | Self::UnsafeTarget { path }
-            | Self::WriteDenied { path, .. }
-            | Self::DurablePublicationUnavailable { path } => path,
+            | Self::WriteDenied { path, .. } => path,
+            Self::AmbiguousSidecars { original, .. } => original,
         }
     }
 }
@@ -121,14 +178,22 @@ enum SidecarObservation {
 
 #[derive(Clone, Debug)]
 pub struct EditableSidecar {
+    locator: SidecarLocator,
     location: SidecarLocation,
     observed: SidecarObservation,
+    association: SidecarAssociation,
 }
 
 impl EditableSidecar {
     pub(crate) fn location(&self) -> &SidecarLocation {
         &self.location
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SidecarAssociation {
+    Unique,
+    Explicit,
 }
 
 #[derive(Clone, Debug)]
@@ -173,20 +238,159 @@ pub enum SaveFailure {
     Io { path: PathBuf, message: String },
 }
 
+enum SidecarDiscovery {
+    Selected(SidecarLocation),
+    Blocked(SidecarBlockReason),
+}
+
+fn discover_sidecar(locator: &SidecarLocator) -> Result<SidecarDiscovery, SidecarReadError> {
+    let primary =
+        SidecarLocation::for_original(&locator.original, locator.naming).map_err(|error| {
+            SidecarReadError {
+                path: locator.original.clone(),
+                source: io::Error::new(io::ErrorKind::InvalidInput, error),
+            }
+        })?;
+    if locator.naming == SidecarNaming::AppendXmpExtension {
+        return Ok(SidecarDiscovery::Selected(primary));
+    }
+    let alternate =
+        SidecarLocation::for_original(&locator.original, SidecarNaming::AppendXmpExtension)
+            .map_err(|error| SidecarReadError {
+                path: locator.original.clone(),
+                source: io::Error::new(io::ErrorKind::InvalidInput, error),
+            })?;
+    let mut existing = Vec::new();
+    for location in [&primary, &alternate] {
+        match fs::symlink_metadata(location.sidecar()) {
+            Ok(_) => existing.push(location.sidecar().to_owned()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(SidecarReadError {
+                    path: location.sidecar().to_owned(),
+                    source,
+                });
+            }
+        }
+    }
+    if existing.len() > 1 {
+        return Ok(SidecarDiscovery::Blocked(
+            SidecarBlockReason::AmbiguousSidecars {
+                original: locator.original.clone(),
+                candidates: existing,
+            },
+        ));
+    }
+    Ok(SidecarDiscovery::Selected(if existing.is_empty() {
+        primary
+    } else if existing[0] == *alternate.sidecar() {
+        alternate
+    } else {
+        primary
+    }))
+}
+
+fn resolve_association(
+    locator: &SidecarLocator,
+    location: &SidecarLocation,
+    associated_source: Option<&str>,
+) -> Result<Result<SidecarAssociation, SidecarBlockReason>, SidecarReadError> {
+    let source_file_name = match locator.original.file_name().and_then(|name| name.to_str()) {
+        Some(name) => name,
+        None => {
+            return Ok(Err(SidecarBlockReason::UnsupportedOriginalName {
+                path: locator.original.clone(),
+            }));
+        }
+    };
+    if let Some(associated_source) = associated_source {
+        return Ok(if associated_source == source_file_name {
+            Ok(SidecarAssociation::Explicit)
+        } else {
+            Err(SidecarBlockReason::AssociatedWithOtherOriginal {
+                path: location.sidecar.clone(),
+                source_file_name: associated_source.to_owned(),
+            })
+        });
+    }
+    if locator.naming == SidecarNaming::AppendXmpExtension {
+        return Ok(Ok(SidecarAssociation::Unique));
+    }
+    let primary =
+        SidecarLocation::for_original(&locator.original, SidecarNaming::ReplaceOriginalExtension)
+            .expect("validated original path");
+    if location.sidecar != primary.sidecar {
+        return Ok(Ok(SidecarAssociation::Unique));
+    }
+    let parent = locator.original.parent().unwrap_or_else(|| Path::new("."));
+    let mut originals = Vec::new();
+    for entry in fs::read_dir(parent).map_err(|source| SidecarReadError {
+        path: parent.to_owned(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| SidecarReadError {
+            path: parent.to_owned(),
+            source,
+        })?;
+        let file_type = entry.file_type().map_err(|source| SidecarReadError {
+            path: entry.path(),
+            source,
+        })?;
+        if !file_type.is_file()
+            || (locator.classify)(&entry.path()) != Some(SidecarNaming::ReplaceOriginalExtension)
+        {
+            continue;
+        }
+        let candidate =
+            SidecarLocation::for_original(&entry.path(), SidecarNaming::ReplaceOriginalExtension)
+                .map_err(|error| SidecarReadError {
+                path: entry.path(),
+                source: io::Error::new(io::ErrorKind::InvalidInput, error),
+            })?;
+        if same_sidecar_slot(&candidate.sidecar, &location.sidecar) {
+            originals.push(entry.path());
+        }
+    }
+    originals.sort();
+    Ok(if originals.len() > 1 {
+        Err(SidecarBlockReason::AmbiguousOriginals {
+            path: location.sidecar.clone(),
+            originals,
+        })
+    } else {
+        Ok(SidecarAssociation::Unique)
+    })
+}
+
+fn same_sidecar_slot(left: &Path, right: &Path) -> bool {
+    left == right
+        || (left.parent() == right.parent()
+            && left
+                .file_name()
+                .and_then(|name| name.to_str())
+                .zip(right.file_name().and_then(|name| name.to_str()))
+                .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right)))
+}
+
 #[derive(Default)]
 pub struct SidecarStore;
 
 impl SidecarStore {
-    pub fn open(&self, location: SidecarLocation) -> Result<SidecarOpen, SidecarReadError> {
+    pub fn open(&self, locator: SidecarLocator) -> Result<SidecarOpen, SidecarReadError> {
+        let location = match discover_sidecar(&locator)? {
+            SidecarDiscovery::Selected(location) => location,
+            SidecarDiscovery::Blocked(reason) => {
+                return Ok(SidecarOpen::Blocked {
+                    recipe: EditRecipe::default(),
+                    reason,
+                });
+            }
+        };
         let path = location.sidecar.clone();
         match read_bounded_sidecar(&path) {
-            Ok(CurrentSidecar::Absent) => Ok(SidecarOpen::Editable {
-                recipe: EditRecipe::default(),
-                document: EditableSidecar {
-                    location,
-                    observed: SidecarObservation::Absent,
-                },
-            }),
+            Ok(CurrentSidecar::Absent) => {
+                self.finish_open(locator, location, EditRecipe::default(), None, None)
+            }
             Ok(CurrentSidecar::Unsafe) => Ok(SidecarOpen::Blocked {
                 recipe: EditRecipe::default(),
                 reason: SidecarBlockReason::UnsafeTarget { path },
@@ -199,13 +403,13 @@ impl SidecarStore {
                 },
             }),
             Ok(CurrentSidecar::Bytes(bytes)) => match parse_owned_xmp(&bytes) {
-                Ok(recipe) => Ok(SidecarOpen::Editable {
-                    recipe,
-                    document: EditableSidecar {
-                        location,
-                        observed: SidecarObservation::Owned(bytes.into()),
-                    },
-                }),
+                Ok(packet) => self.finish_open(
+                    locator,
+                    location,
+                    packet.recipe,
+                    packet.source_file_name.as_deref(),
+                    Some(bytes),
+                ),
                 Err(ParseRefusal::NewerSchema(found)) => Ok(SidecarOpen::Blocked {
                     recipe: EditRecipe::default(),
                     reason: SidecarBlockReason::NewerSchema { path, found },
@@ -216,6 +420,30 @@ impl SidecarStore {
                 }),
             },
             Err(source) => Err(SidecarReadError { path, source }),
+        }
+    }
+
+    fn finish_open(
+        &self,
+        locator: SidecarLocator,
+        location: SidecarLocation,
+        recipe: EditRecipe,
+        source_file_name: Option<&str>,
+        bytes: Option<Vec<u8>>,
+    ) -> Result<SidecarOpen, SidecarReadError> {
+        match resolve_association(&locator, &location, source_file_name)? {
+            Ok(association) => Ok(SidecarOpen::Editable {
+                recipe,
+                document: EditableSidecar {
+                    locator,
+                    location,
+                    observed: bytes
+                        .map(|bytes| SidecarObservation::Owned(bytes.into()))
+                        .unwrap_or(SidecarObservation::Absent),
+                    association,
+                },
+            }),
+            Err(reason) => Ok(SidecarOpen::Blocked { recipe, reason }),
         }
     }
 
@@ -272,77 +500,115 @@ fn commit_sidecar(
     recipe: &EditRecipe,
     validate: impl FnOnce() -> Result<(), SaveFailure>,
 ) -> Result<EditableSidecar, SaveFailure> {
-    #[cfg(not(unix))]
-    {
-        let _ = recipe;
-        return Err(SaveFailure::ReadOnly(
-            SidecarBlockReason::DurablePublicationUnavailable {
+    compare_observation(document)?;
+    validate_association(document)?;
+    let source_file_name = document
+        .location
+        .original
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            SaveFailure::ReadOnly(SidecarBlockReason::UnsupportedOriginalName {
+                path: document.location.original.clone(),
+            })
+        })?;
+    let bytes = serialize_owned_xmp(recipe, source_file_name);
+    let (temporary_path, mut temporary) = create_temporary(&document.location)?;
+    let write_result = (|| -> io::Result<()> {
+        temporary.write_all(&bytes)?;
+        temporary.flush()?;
+        temporary.sync_all()?;
+        Ok(())
+    })();
+    drop(temporary);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(map_write_error(&document.location.sidecar, error));
+    }
+
+    if let Err(failure) = compare_observation(document) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(failure);
+    }
+    if let Err(failure) = validate_association(document) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(failure);
+    }
+    if let Err(failure) = validate() {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(failure);
+    }
+
+    let publication = match document.observed {
+        SidecarObservation::Absent => fs::hard_link(&temporary_path, &document.location.sidecar),
+        SidecarObservation::Owned(_) => fs::rename(&temporary_path, &document.location.sidecar),
+    };
+    if let Err(error) = publication {
+        let _ = fs::remove_file(&temporary_path);
+        if matches!(document.observed, SidecarObservation::Absent)
+            && error.kind() == io::ErrorKind::AlreadyExists
+        {
+            return Err(SaveFailure::Conflict(ConflictKind::CreatedExternally));
+        }
+        return Err(map_write_error(&document.location.sidecar, error));
+    }
+    if matches!(document.observed, SidecarObservation::Absent) {
+        let _ = fs::remove_file(&temporary_path);
+    }
+
+    sync_parent(&document.location.sidecar)
+        .map_err(|error| map_write_error(&document.location.sidecar, error))?;
+    let final_bytes = match read_bounded_sidecar(&document.location.sidecar) {
+        Ok(CurrentSidecar::Bytes(final_bytes)) if final_bytes == bytes => final_bytes,
+        Ok(_) => {
+            return Err(SaveFailure::Io {
                 path: document.location.sidecar.clone(),
+                message: "published sidecar could not be verified".to_owned(),
+            });
+        }
+        Err(error) => return Err(map_write_error(&document.location.sidecar, error)),
+    };
+    Ok(EditableSidecar {
+        locator: document.locator.clone(),
+        location: document.location.clone(),
+        observed: SidecarObservation::Owned(final_bytes.into()),
+        association: SidecarAssociation::Explicit,
+    })
+}
+
+fn validate_association(document: &EditableSidecar) -> Result<(), SaveFailure> {
+    let location = match discover_sidecar(&document.locator).map_err(|error| SaveFailure::Io {
+        path: error.path,
+        message: error.source.to_string(),
+    })? {
+        SidecarDiscovery::Selected(location) => location,
+        SidecarDiscovery::Blocked(reason) => return Err(SaveFailure::ReadOnly(reason)),
+    };
+    if location != document.location {
+        return Err(SaveFailure::ReadOnly(
+            SidecarBlockReason::AmbiguousSidecars {
+                original: document.location.original.clone(),
+                candidates: vec![document.location.sidecar.clone(), location.sidecar],
             },
         ));
     }
-
-    #[cfg(unix)]
-    {
-        compare_observation(document)?;
-        let bytes = serialize_owned_xmp(recipe);
-        let (temporary_path, mut temporary) = create_temporary(&document.location)?;
-        let write_result = (|| -> io::Result<()> {
-            temporary.write_all(&bytes)?;
-            temporary.flush()?;
-            temporary.sync_all()?;
-            Ok(())
-        })();
-        drop(temporary);
-        if let Err(error) = write_result {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(map_write_error(&document.location.sidecar, error));
-        }
-
-        if let Err(failure) = compare_observation(document) {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(failure);
-        }
-        if let Err(failure) = validate() {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(failure);
-        }
-
-        let publication = match document.observed {
-            SidecarObservation::Absent => {
-                fs::hard_link(&temporary_path, &document.location.sidecar)
-            }
-            SidecarObservation::Owned(_) => fs::rename(&temporary_path, &document.location.sidecar),
-        };
-        if let Err(error) = publication {
-            let _ = fs::remove_file(&temporary_path);
-            if matches!(document.observed, SidecarObservation::Absent)
-                && error.kind() == io::ErrorKind::AlreadyExists
-            {
-                return Err(SaveFailure::Conflict(ConflictKind::CreatedExternally));
-            }
-            return Err(map_write_error(&document.location.sidecar, error));
-        }
-        if matches!(document.observed, SidecarObservation::Absent) {
-            let _ = fs::remove_file(&temporary_path);
-        }
-
-        sync_parent(&document.location.sidecar)
-            .map_err(|error| map_write_error(&document.location.sidecar, error))?;
-        let final_bytes = match read_bounded_sidecar(&document.location.sidecar) {
-            Ok(CurrentSidecar::Bytes(final_bytes)) if final_bytes == bytes => final_bytes,
-            Ok(_) => {
-                return Err(SaveFailure::Io {
-                    path: document.location.sidecar.clone(),
-                    message: "published sidecar could not be verified".to_owned(),
-                });
-            }
-            Err(error) => return Err(map_write_error(&document.location.sidecar, error)),
-        };
-        Ok(EditableSidecar {
-            location: document.location.clone(),
-            observed: SidecarObservation::Owned(final_bytes.into()),
+    let associated_source = (document.association == SidecarAssociation::Explicit)
+        .then(|| {
+            document
+                .location
+                .original
+                .file_name()
+                .and_then(|name| name.to_str())
         })
+        .flatten();
+    match resolve_association(&document.locator, &document.location, associated_source).map_err(
+        |error| SaveFailure::Io {
+            path: error.path,
+            message: error.source.to_string(),
+        },
+    )? {
+        Ok(_) => Ok(()),
+        Err(reason) => Err(SaveFailure::ReadOnly(reason)),
     }
 }
 
@@ -398,6 +664,11 @@ fn sync_parent(path: &Path) -> io::Result<()> {
     File::open(usable_parent(path))?.sync_all()
 }
 
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 fn usable_parent(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -418,22 +689,29 @@ fn map_write_error(path: &Path, error: io::Error) -> SaveFailure {
     }
 }
 
-fn serialize_owned_xmp(recipe: &EditRecipe) -> Vec<u8> {
+fn serialize_owned_xmp(recipe: &EditRecipe, source_file_name: &str) -> Vec<u8> {
     format!(
         concat!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
             "<x:xmpmeta xmlns:x=\"{XMP_NS}\">\n",
             "  <rdf:RDF xmlns:rdf=\"{RDF_NS}\">\n",
-            "    <rdf:Description rdf:about=\"\" xmlns:crema=\"{CREMA_NS}\" crema:owner=\"Crema\" crema:schemaVersion=\"1\" crema:exposureCentistops=\"{}\"/>\n",
+            "    <rdf:Description rdf:about=\"\" xmlns:crema=\"{CREMA_NS}\" crema:owner=\"Crema\" crema:schemaVersion=\"{CURRENT_SCHEMA}\" crema:sourceFileName=\"{}\" crema:exposureCentistops=\"{}\"/>\n",
             "  </rdf:RDF>\n",
             "</x:xmpmeta>\n",
         ),
+        escape(source_file_name),
         recipe.exposure().value(),
         XMP_NS = XMP_NS,
         RDF_NS = RDF_NS,
         CREMA_NS = CREMA_NS,
+        CURRENT_SCHEMA = CURRENT_SCHEMA,
     )
     .into_bytes()
+}
+
+struct OwnedPacket {
+    recipe: EditRecipe,
+    source_file_name: Option<String>,
 }
 
 enum ParseRefusal {
@@ -455,7 +733,7 @@ struct ElementFrame {
 struct InspectedElement {
     name: ElementName,
     namespaces: HashMap<String, String>,
-    recipe: Option<EditRecipe>,
+    packet: Option<OwnedPacket>,
 }
 
 #[derive(Default)]
@@ -493,7 +771,7 @@ impl DocumentStructure {
     }
 }
 
-fn parse_owned_xmp(bytes: &[u8]) -> Result<EditRecipe, ParseRefusal> {
+fn parse_owned_xmp(bytes: &[u8]) -> Result<OwnedPacket, ParseRefusal> {
     if std::str::from_utf8(bytes).is_err() {
         return Err(ParseRefusal::Unrecognized);
     }
@@ -501,7 +779,7 @@ fn parse_owned_xmp(bytes: &[u8]) -> Result<EditRecipe, ParseRefusal> {
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
     let mut stack: Vec<ElementFrame> = Vec::new();
-    let mut recipe = None;
+    let mut packet = None;
     let mut structure = DocumentStructure::default();
     let mut saw_declaration = false;
     let mut saw_root = false;
@@ -519,8 +797,8 @@ fn parse_owned_xmp(bytes: &[u8]) -> Result<EditRecipe, ParseRefusal> {
                 saw_root = true;
                 let inspected = inspect_element(&start, &stack)?;
                 structure.observe(&inspected.name)?;
-                if let Some(parsed_recipe) = inspected.recipe {
-                    recipe = Some(parsed_recipe);
+                if let Some(parsed_packet) = inspected.packet {
+                    packet = Some(parsed_packet);
                 }
                 stack.push(ElementFrame {
                     name: inspected.name,
@@ -534,8 +812,8 @@ fn parse_owned_xmp(bytes: &[u8]) -> Result<EditRecipe, ParseRefusal> {
                 saw_root = true;
                 let inspected = inspect_element(&start, &stack)?;
                 structure.observe(&inspected.name)?;
-                if let Some(parsed_recipe) = inspected.recipe {
-                    recipe = Some(parsed_recipe);
+                if let Some(parsed_packet) = inspected.packet {
+                    packet = Some(parsed_packet);
                 }
             }
             Event::End(end) => {
@@ -560,7 +838,7 @@ fn parse_owned_xmp(bytes: &[u8]) -> Result<EditRecipe, ParseRefusal> {
         return Err(ParseRefusal::Unrecognized);
     }
     structure.require_owned_shape()?;
-    recipe.ok_or(ParseRefusal::Unrecognized)
+    packet.ok_or(ParseRefusal::Unrecognized)
 }
 
 fn inspect_element(
@@ -597,7 +875,7 @@ fn inspect_element(
             Ok(InspectedElement {
                 name,
                 namespaces,
-                recipe: None,
+                packet: None,
             })
         }
         1 if name.namespace.as_deref() == Some(RDF_NS) && name.local == "RDF" => {
@@ -610,18 +888,18 @@ fn inspect_element(
             Ok(InspectedElement {
                 name,
                 namespaces,
-                recipe: None,
+                packet: None,
             })
         }
         2 if name.namespace.as_deref() == Some(RDF_NS) && name.local == "Description" => {
             if stack[1].name.namespace.as_deref() != Some(RDF_NS) || stack[1].name.local != "RDF" {
                 return Err(ParseRefusal::Unrecognized);
             }
-            let recipe = parse_description_attributes(raw_attributes, &namespaces)?;
+            let packet = parse_description_attributes(raw_attributes, &namespaces)?;
             Ok(InspectedElement {
                 name,
                 namespaces,
-                recipe: Some(recipe),
+                packet: Some(packet),
             })
         }
         _ => Err(ParseRefusal::Unrecognized),
@@ -631,10 +909,11 @@ fn inspect_element(
 fn parse_description_attributes(
     raw_attributes: Vec<(String, String)>,
     namespaces: &HashMap<String, String>,
-) -> Result<EditRecipe, ParseRefusal> {
+) -> Result<OwnedPacket, ParseRefusal> {
     let mut about = None;
     let mut owner = None;
     let mut schema = None;
+    let mut source_file_name = None;
     let mut exposure = None;
     for (key, value) in raw_attributes {
         let name = resolve_name(&key, namespaces, true)?;
@@ -642,6 +921,9 @@ fn parse_description_attributes(
             (Some(RDF_NS), "about") if about.is_none() => about = Some(value),
             (Some(CREMA_NS), "owner") if owner.is_none() => owner = Some(value),
             (Some(CREMA_NS), "schemaVersion") if schema.is_none() => schema = Some(value),
+            (Some(CREMA_NS), "sourceFileName") if source_file_name.is_none() => {
+                source_file_name = Some(value)
+            }
             (Some(CREMA_NS), "exposureCentistops") if exposure.is_none() => exposure = Some(value),
             _ => return Err(ParseRefusal::Unrecognized),
         }
@@ -653,10 +935,13 @@ fn parse_description_attributes(
         .ok_or(ParseRefusal::Unrecognized)?
         .parse::<u32>()
         .map_err(|_| ParseRefusal::Unrecognized)?;
-    if schema > 1 {
+    if schema > CURRENT_SCHEMA {
         return Err(ParseRefusal::NewerSchema(schema));
     }
-    if schema != 1 {
+    if schema == 0 || (schema == 1 && source_file_name.is_some()) {
+        return Err(ParseRefusal::Unrecognized);
+    }
+    if schema == CURRENT_SCHEMA && source_file_name.as_deref().is_none_or(str::is_empty) {
         return Err(ParseRefusal::Unrecognized);
     }
     let exposure = exposure
@@ -664,7 +949,10 @@ fn parse_description_attributes(
         .parse::<i16>()
         .map_err(|_| ParseRefusal::Unrecognized)?;
     let exposure = ExposureCentistops::new(exposure).map_err(|_| ParseRefusal::Unrecognized)?;
-    Ok(EditRecipe::new(exposure))
+    Ok(OwnedPacket {
+        recipe: EditRecipe::new(exposure),
+        source_file_name,
+    })
 }
 
 fn resolve_name(

@@ -18,11 +18,16 @@ jobs:
         with:
           toolchain: "1.95"
           components: clippy,rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Test evidence contracts
+        run: python -B -m unittest discover -s scripts -p "test_*.py"
       - name: Build release binaries
         run: cargo build --release -p crema-app --bins

@@ -216,7 +216,7 @@ fn persistent_thumbnail_is_reused_by_a_fresh_real_process() {
                 .lines()
                 .find(|line| line.contains("\tthumbnail_ready\t"))
                 .expect("provisional thumbnail metric");
-            assert_eq!(thumbnail.split('\t').nth(3), Some("Thumbnail"));
+            assert_eq!(thumbnail.split('\t').nth(4), Some("Thumbnail"));
         } else if name == "cold" {
             assert!(metrics.contains("\tsource_read_bytes\t"));
         } else {

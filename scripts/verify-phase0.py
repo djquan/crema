@@ -24,6 +24,7 @@ REQUIRED_BUNDLE_CHECKS = {
     "format",
     "clippy",
     "tests",
+    "python-tests",
     "release-binaries",
     "decoder-probes",
     "original-integrity",
@@ -31,6 +32,8 @@ REQUIRED_BUNDLE_CHECKS = {
     "dependency-phase0-plan",
     *REQUIRED_FIXTURES,
 }
+FRAME_BUDGET_US = 16_667
+GUI_WORKFLOW = {"navigation", "exposure", "save-reopen", "export", "close"}
 
 
 def digest(path):
@@ -107,25 +110,199 @@ def load_bundle(path):
     }
 
 
-def performance_receipt_error(value):
+def artifact_error(bundle, value, label):
+    if not isinstance(value, dict) or set(value) != {"path", "sha256"}:
+        return f"{label} must contain only path and sha256"
+    relative = value.get("path")
+    expected = value.get("sha256")
+    if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
+        return f"{label} path must be bundle-relative"
+    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        return f"{label} sha256 is invalid"
+    try:
+        root = bundle.resolve(strict=True)
+        path = (bundle / relative).resolve(strict=True)
+    except OSError as error:
+        return f"{label} cannot be read: {error}"
+    if root not in path.parents or not path.is_file():
+        return f"{label} must reference a file inside the bundle"
+    if digest(path) != expected:
+        return f"{label} digest does not match"
+    return None
+
+
+def metric_events(bundle, reference, label):
+    if error := artifact_error(bundle, reference, label):
+        return error, []
+    path = bundle / reference["path"]
+    try:
+        with path.open(newline="") as source:
+            events = list(csv.DictReader(source, delimiter="\t"))
+    except (OSError, csv.Error) as error:
+        return f"{label} cannot be parsed: {error}", []
+    required = {
+        "session_id", "micros", "event", "asset", "purpose", "generation",
+        "interest", "attempt", "value",
+    }
+    if not events or not required.issubset(events[0]):
+        return f"{label} is empty or has an invalid header", []
+    try:
+        for row in events:
+            for field in ["micros", "generation", "interest", "attempt", "value"]:
+                if int(row[field]) < 0:
+                    raise ValueError(field)
+    except (KeyError, TypeError, ValueError):
+        return f"{label} contains an invalid integer field", []
+    return None, events
+
+
+def successful_event(events, name):
+    return any(row["event"] == name and int(row["value"]) > 0 for row in events)
+
+
+def gui_receipt_error(value, bundle, source, host):
     if not isinstance(value, dict):
         return "top level must be an object"
-    integers = {
-        "indexed_photos": 10_000,
-        "frame_count": 100,
-        "distinct_grid_positions": 20,
-        "grid_items_traversed": 500,
-        "budget_us": 1,
-        "p95_us": 0,
+    if value.get("schema") != 2 or value.get("kind") != "gui":
+        return "schema must be 2 and kind must be gui"
+    if value.get("source") != source or value.get("host") != host:
+        return "source or host identity does not match the bundle"
+    if value.get("system") != host.get("system"):
+        return "system does not match the bundle host"
+    if error := artifact_error(bundle, value.get("app"), "app"):
+        return error
+    for field in ["fixtures", "sidecars", "exports"]:
+        artifacts = value.get(field)
+        if not isinstance(artifacts, list) or not artifacts:
+            return f"{field} must be a nonempty artifact list"
+        for index, artifact in enumerate(artifacts):
+            if error := artifact_error(bundle, artifact, f"{field}[{index}]"):
+                return error
+
+    sessions = value.get("sessions")
+    if not isinstance(sessions, list) or len(sessions) != 2:
+        return "sessions must contain one save launch and one restore launch"
+    if {row.get("role") for row in sessions if isinstance(row, dict)} != {"save", "restore"}:
+        return "sessions must have distinct save and restore roles"
+    identifiers = [row.get("id") for row in sessions if isinstance(row, dict)]
+    if len(identifiers) != 2 or any(not isinstance(item, str) or not item for item in identifiers):
+        return "every session needs a nonempty id"
+    if len(set(identifiers)) != 2:
+        return "session ids must be unique"
+    by_role = {}
+    for session in sessions:
+        if session.get("normal_exit") is not True:
+            return f"session {session.get('id')} did not exit normally"
+        error, events = metric_events(bundle, session.get("metrics"), f"session {session.get('id')} metrics")
+        if error:
+            return error
+        if {row["session_id"] for row in events} != {session["id"]}:
+            return f"session {session['id']} metrics contain another session id"
+        if not successful_event(events, "gui_launch") or not successful_event(events, "gui_exit"):
+            return f"session {session['id']} lacks a successful launch or exit"
+        if any(row["event"] == "metrics_dropped" and int(row["value"]) for row in events):
+            return f"session {session['id']} dropped metrics"
+        by_role[session["role"]] = events
+    save = by_role["save"]
+    restore = by_role["restore"]
+    if sum(row["event"] == "gui_selection" for row in save) < 2:
+        return "save session lacks two navigation selections"
+    for event in ["edit_render_received", "save_finished", "recipe_saved", "export_finished"]:
+        if not successful_event(save, event):
+            return f"save session lacks successful {event}"
+    saved = {(row["interest"], row["value"]) for row in save if row["event"] == "recipe_saved"}
+    restored = {
+        (row["interest"], row["value"])
+        for row in restore
+        if row["event"] == "recipe_restored"
     }
-    for name, minimum in integers.items():
+    if not saved.intersection(restored):
+        return "restore session does not reopen the saved asset and recipe"
+
+    observations = value.get("ui_observations")
+    if not isinstance(observations, list):
+        return "ui_observations must be a list"
+    checks = [row.get("check") for row in observations if isinstance(row, dict)]
+    if set(checks) != GUI_WORKFLOW or len(checks) != len(GUI_WORKFLOW):
+        return "ui_observations must contain each core workflow check exactly once"
+    session_ids = set(identifiers)
+    if any(row.get("status") != "Pass" or row.get("session_id") not in session_ids for row in observations):
+        return "every UI observation must pass and name a receipt session"
+    capabilities = value.get("verified_capabilities")
+    if (
+        not isinstance(capabilities, list)
+        or len(capabilities) != len(GUI_WORKFLOW)
+        or set(capabilities) != GUI_WORKFLOW
+    ):
+        return "verified_capabilities must contain only the core GUI workflow"
+    return None
+
+
+def percentile(values, fraction):
+    index = min(len(values) - 1, int((len(values) - 1) * fraction))
+    return values[index]
+
+
+def performance_receipt_error(value, bundle=None, source=None, host=None):
+    if not isinstance(value, dict):
+        return "top level must be an object"
+    if value.get("schema") != 2 or value.get("kind") != "performance":
+        return "schema must be 2 and kind must be performance"
+    if value.get("measurement") != "gui-work" or value.get("cache_state") != "warm":
+        return "measurement must be gui-work with a warm cache"
+    if value.get("budget_us") != FRAME_BUDGET_US:
+        return f"budget_us must be the assessor-owned {FRAME_BUDGET_US}"
+    if bundle is None:
+        return "bundle is required to validate raw performance metrics"
+    if value.get("source") != source or value.get("host") != host:
+        return "source or host identity does not match the bundle"
+    if value.get("system") != host.get("system"):
+        return "system does not match the bundle host"
+    if error := artifact_error(bundle, value.get("app"), "app"):
+        return error
+    error, events = metric_events(bundle, value.get("metrics"), "performance metrics")
+    if error:
+        return error
+    session_id = value.get("session_id")
+    if not isinstance(session_id, str) or {row["session_id"] for row in events} != {session_id}:
+        return "performance metrics do not match session_id"
+    if not successful_event(events, "gui_exit"):
+        return "performance session did not exit normally"
+    if any(row["event"] == "metrics_dropped" and int(row["value"]) for row in events):
+        return "performance metrics were dropped"
+    if any(row["event"] in {"cache_miss", "cache_store"} for row in events):
+        return "performance metrics are not a warm-cache run"
+    cache_hits = sum(row["event"] == "cache_hit" for row in events)
+    indexed_photos = max(
+        (int(row["value"]) for row in events if row["event"] == "scan_finished"),
+        default=0,
+    )
+    frames = sorted(int(row["value"]) for row in events if row["event"] == "gui_frame_us")
+    starts = {int(row["interest"]) for row in events if row["event"] == "grid_visible"}
+    ends = [int(row["attempt"]) for row in events if row["event"] == "grid_visible"]
+    traversed = max(ends, default=0) - min(starts, default=0)
+    if indexed_photos < 10_000 or len(frames) < 100 or len(starts) < 20 or traversed < 500 or cache_hits == 0:
+        return "raw metrics do not meet the 10000-photo warm traversal definition"
+    computed = {
+        "indexed_photos": indexed_photos,
+        "cache_hits": cache_hits,
+        "frame_count": len(frames),
+        "distinct_grid_positions": len(starts),
+        "grid_items_traversed": traversed,
+        "p50_us": percentile(frames, 0.50),
+        "p95_us": percentile(frames, 0.95),
+        "p99_us": percentile(frames, 0.99),
+        "max_us": frames[-1],
+        "frames_over_budget": sum(frame > FRAME_BUDGET_US for frame in frames),
+    }
+    for name, expected in computed.items():
         current = value.get(name)
-        if isinstance(current, bool) or not isinstance(current, int) or current < minimum:
-            return f"{name} must be an integer of at least {minimum}"
-    if value["p95_us"] > value["budget_us"]:
-        return "p95_us exceeds budget_us"
-    if value.get("schema") != 1:
-        return "schema must be 1"
+        if isinstance(current, bool) or not isinstance(current, int):
+            return f"{name} must be an integer"
+        if current != expected:
+            return f"{name} does not match raw metrics"
+    if computed["p95_us"] > FRAME_BUDGET_US:
+        return "p95 GUI work exceeds the fixed frame budget"
     return None
 
 
@@ -148,10 +325,11 @@ def release_assessment(output, evidence_paths):
         statuses = {row["check"]: row["status"] for row in bundle["results"]}
         for check in sorted(REQUIRED_BUNDLE_CHECKS):
             status = statuses.get(check)
+            release_status = status if status in {"Pass", "Blocked"} else "Fail"
             add(
                 results,
                 f"{bundle['host'].get('system', 'unknown').lower()}-{check}",
-                "Pass" if status == "Pass" else "Fail",
+                release_status,
                 f"bundle check is {status or 'missing'} in {bundle['path']}",
             )
     for system in ["Darwin", "Windows", "Linux"]:
@@ -170,10 +348,10 @@ def release_assessment(output, evidence_paths):
         if receipt.exists():
             try:
                 value = json.loads(receipt.read_text())
-                if not isinstance(value, dict):
-                    add(results, "gui-receipt-schema", "Fail", f"top level is not an object in {receipt}")
-                elif value.get("source") != bundle["source"]:
-                    add(results, "gui-receipt-identity", "Fail", f"source mismatch in {receipt}")
+                if error := gui_receipt_error(
+                    value, bundle["path"], bundle["source"], bundle["host"]
+                ):
+                    add(results, "gui-receipt-schema", "Fail", f"{error} in {receipt}")
                 else:
                     receipts.append((bundle, value))
             except (OSError, ValueError, json.JSONDecodeError) as error:
@@ -187,10 +365,10 @@ def release_assessment(output, evidence_paths):
         if receipt.exists():
             try:
                 value = json.loads(receipt.read_text())
-                if error := performance_receipt_error(value):
+                if error := performance_receipt_error(
+                    value, bundle["path"], bundle["source"], bundle["host"]
+                ):
                     add(results, "performance-receipt-schema", "Fail", f"{error} in {receipt}")
-                elif value.get("source") != bundle["source"]:
-                    add(results, "performance-receipt-identity", "Fail", f"source mismatch in {receipt}")
                 else:
                     performance_receipts.append((bundle, value))
             except (OSError, ValueError, json.JSONDecodeError) as error:
@@ -272,7 +450,13 @@ def write_license_report(repo, evidence, results):
         add(results, "dependency-license-metadata", "Fail", f"missing license metadata: {', '.join(missing)}", "licenses.tsv")
     else:
         add(results, "dependency-license-metadata", "Pass", f"{len(packages)} packages report a license or license file", "licenses.tsv")
-    add(results, "dependency-phase0-plan", "Pass", "confirmed dependencies are pinned and release packaging remains a separate gate", "licenses.tsv")
+    add(
+        results,
+        "dependency-phase0-plan",
+        "Blocked",
+        "no reviewed, source-bound dependency approval record was supplied",
+        "licenses.tsv",
+    )
 
 
 def verify_toolchain(repo, results):
@@ -351,6 +535,10 @@ def main(argv=None):
         ("format", ["cargo", "fmt", "--all", "--check"]),
         ("clippy", ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]),
         ("tests", ["cargo", "test", "--workspace"]),
+        (
+            "python-tests",
+            [sys.executable, "-B", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_*.py"],
+        ),
         ("release-binaries", ["cargo", "build", "--release", "-p", "crema-app", "--bins"]),
     ]:
         run_check(repo, output, results, check, command)
